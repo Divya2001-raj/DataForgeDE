@@ -1,0 +1,395 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  --color-canvas: var(--bg-canvas);
+  --color-card: var(--bg-card);
+  --color-subtle: var(--border-subtle);
+  --color-primary: var(--text-primary);
+  --color-muted: var(--text-muted);
+  --color-accent: var(--accent-primary);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-contrast: var(--accent-contrast);
+  --font-display: var(--app-font-heading);
+  --font-sans: var(--app-font-body);
+  --font-mono: var(--app-font-mono);
+}
+
+@layer base {
+  /* 1. Obsidian Lavender (Dark - Default) */
+  :root,
+  html[data-theme="obsidian-lavender"] {
+    --bg-canvas: #09090B;
+    --bg-card: #121216;
+    --bg-surface: #121216;
+    --border-subtle: #27272A;
+    --text-primary: #FAFAFA;
+    --text-muted: #A1A1AA;
+    --accent-primary: #9D7FEA;
+    --accent-hover: #8B68E0;
+    --accent-contrast: #09090B;
+    --accent-rgb: 157, 127, 234;
+    --accent-lavender: #9D7FEA;
+    --app-font-heading: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-body: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  /* 2. Alabaster Lavender (Light) */
+  html[data-theme="alabaster-lavender"] {
+    --bg-canvas: #FFFFFF;
+    --bg-card: #F8F7FC;
+    --bg-surface: #F8F7FC;
+    --border-subtle: #E4E4E7;
+    --text-primary: #09090B;
+    --text-muted: #52525B;
+    --accent-primary: #9D7FEA;
+    --accent-hover: #8B68E0;
+    --accent-contrast: #09090B;
+    --accent-rgb: 157, 127, 234;
+    --accent-lavender: #9D7FEA;
+  }
+
+  /* 3. Crimson Noir (Dark) */
+  html[data-theme="crimson-noir"] {
+    --bg-canvas: #070709;
+    --bg-card: #120D0F;
+    --bg-surface: #120D0F;
+    --border-subtle: #2E1A21;
+    --text-primary: #FAFAFA;
+    --text-muted: #A1A1AA;
+    --accent-primary: #EF4444;
+    --accent-hover: #DC2626;
+    --accent-contrast: #FFFFFF;
+    --accent-rgb: 239, 68, 68;
+    --accent-lavender: #EF4444;
+  }
+
+  /* 4. Scarlet Ivory (Light) */
+  html[data-theme="scarlet-ivory"] {
+    --bg-canvas: #FFFFFF;
+    --bg-card: #FDF8F8;
+    --bg-surface: #FDF8F8;
+    --border-subtle: #E8DCDC;
+    --text-primary: #111115;
+    --text-muted: #52525B;
+    --accent-primary: #DC2626;
+    --accent-hover: #B91C1C;
+    --accent-contrast: #FFFFFF;
+    --accent-rgb: 220, 38, 38;
+    --accent-lavender: #DC2626;
+  }
+
+  /* 5. Cyber Emerald (Dark) */
+  html[data-theme="cyber-emerald"] {
+    --bg-canvas: #060B09;
+    --bg-card: #0D1613;
+    --bg-surface: #0D1613;
+    --border-subtle: #1E332B;
+    --text-primary: #F4FBF8;
+    --text-muted: #94A3B8;
+    --accent-primary: #10B981;
+    --accent-hover: #059669;
+    --accent-contrast: #060B09;
+    --accent-rgb: 16, 185, 129;
+    --accent-lavender: #10B981;
+  }
+
+  /* 6. Tokyo Midnight (Dark) */
+  html[data-theme="tokyo-midnight"] {
+    --bg-canvas: #0B0E17;
+    --bg-card: #131826;
+    --bg-surface: #131826;
+    --border-subtle: #232B42;
+    --text-primary: #F8FAFC;
+    --text-muted: #94A3B8;
+    --accent-primary: #38BDF8;
+    --accent-hover: #0EA5E9;
+    --accent-contrast: #0B0E17;
+    --accent-rgb: 56, 189, 248;
+    --accent-lavender: #38BDF8;
+  }
+
+  /* 7. Amber Terminal (Dark) */
+  html[data-theme="amber-terminal"] {
+    --bg-canvas: #0A0806;
+    --bg-card: #14100C;
+    --bg-surface: #14100C;
+    --border-subtle: #2D231A;
+    --text-primary: #FAFAF9;
+    --text-muted: #A8A29E;
+    --accent-primary: #F59E0B;
+    --accent-hover: #D97706;
+    --accent-contrast: #0A0806;
+    --accent-rgb: 245, 158, 11;
+    --accent-lavender: #F59E0B;
+  }
+
+  /* 8. Sakura Velvet (Dark) */
+  html[data-theme="sakura-velvet"] {
+    --bg-canvas: #0C080B;
+    --bg-card: #171015;
+    --bg-surface: #171015;
+    --border-subtle: #30202B;
+    --text-primary: #FDF2F8;
+    --text-muted: #A1A1AA;
+    --accent-primary: #F472B6;
+    --accent-hover: #EC4899;
+    --accent-contrast: #0C080B;
+    --accent-rgb: 244, 114, 182;
+    --accent-lavender: #F472B6;
+  }
+
+  /* 9. Nordic Frost (Light) */
+  html[data-theme="nordic-frost"] {
+    --bg-canvas: #F8FAFC;
+    --bg-card: #FFFFFF;
+    --bg-surface: #FFFFFF;
+    --border-subtle: #CBD5E1;
+    --text-primary: #0F172A;
+    --text-muted: #475569;
+    --accent-primary: #0284C7;
+    --accent-hover: #0369A1;
+    --accent-contrast: #FFFFFF;
+    --accent-rgb: 2, 132, 199;
+    --accent-lavender: #0284C7;
+  }
+
+  /* 10. Matcha Cream (Light) */
+  html[data-theme="matcha-cream"] {
+    --bg-canvas: #FAFBF7;
+    --bg-card: #F2F5EC;
+    --bg-surface: #F2F5EC;
+    --border-subtle: #D7E0CC;
+    --text-primary: #142317;
+    --text-muted: #4B5E4F;
+    --accent-primary: #16A34A;
+    --accent-hover: #15803D;
+    --accent-contrast: #FFFFFF;
+    --accent-rgb: 22, 163, 74;
+    --accent-lavender: #16A34A;
+  }
+
+  /* 11. Cyberpunk Synth (Dark) */
+  html[data-theme="cyberpunk-synth"] {
+    --bg-canvas: #090512;
+    --bg-card: #130B24;
+    --bg-surface: #130B24;
+    --border-subtle: #2C1A4D;
+    --text-primary: #FAF5FF;
+    --text-muted: #A1A1AA;
+    --accent-primary: #E879F9;
+    --accent-hover: #D946EF;
+    --accent-contrast: #090512;
+    --accent-rgb: 232, 121, 249;
+    --accent-lavender: #E879F9;
+  }
+
+  /* 12. Espresso Parchment (Light) */
+  html[data-theme="espresso-parchment"] {
+    --bg-canvas: #FDFBF7;
+    --bg-card: #F5EFE6;
+    --bg-surface: #F5EFE6;
+    --border-subtle: #E2D6C5;
+    --text-primary: #1C1917;
+    --text-muted: #57534E;
+    --accent-primary: #B45309;
+    --accent-hover: #92400E;
+    --accent-contrast: #FFFFFF;
+    --accent-rgb: 180, 83, 9;
+    --accent-lavender: #B45309;
+  }
+
+  /* 13 Curated Three-Tier Font Presets controlled by Aa switcher */
+  html[data-font-preset="modern"] {
+    --app-font-heading: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-body: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html[data-font-preset="editorial"] {
+    --app-font-heading: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-body: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-mono: 'Fira Code', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html[data-font-preset="classic"] {
+    --app-font-heading: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-body: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html[data-font-preset="geometric-pro"] {
+    --app-font-heading: 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-body: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-mono: 'Source Code Pro', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html[data-font-preset="swiss-grid"] {
+    --app-font-heading: 'Work Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-body: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html[data-font-preset="neo-grotesque"] {
+    --app-font-heading: 'Sora', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-body: 'Rubik', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-mono: 'Space Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html[data-font-preset="sharp-tech"] {
+    --app-font-heading: 'Syne', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-body: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html[data-font-preset="humanist-crisp"] {
+    --app-font-heading: 'Nunito Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-body: 'Lato', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-mono: 'Roboto Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html[data-font-preset="executive-serif"] {
+    --app-font-heading: 'Playfair Display', Georgia, serif;
+    --app-font-body: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-mono: 'Fira Code', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html[data-font-preset="compact-terminal"] {
+    --app-font-heading: 'Chakra Petch', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-body: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-mono: 'Share Tech Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html[data-font-preset="nordic-clean"] {
+    --app-font-heading: 'Lexend', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-body: 'Albert Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html[data-font-preset="high-contrast"] {
+    --app-font-heading: 'Montserrat', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-body: 'Open Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --app-font-mono: 'Inconsolata', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  html[data-font-preset="mono-hacker"] {
+    --app-font-heading: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+    --app-font-body: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+    --app-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  body {
+    font-family: var(--app-font-body);
+    line-height: 1.65;
+    background-color: var(--bg-canvas);
+    color: var(--text-primary);
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--app-font-heading);
+  }
+
+  code, pre, textarea.font-mono, .font-mono {
+    font-family: var(--app-font-mono);
+    font-variant-ligatures: contextual;
+    font-feature-settings: "calt" 1, "liga" 1;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom subtle scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(var(--accent-rgb), 0.28);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--accent-rgb), 0.5);
+}
+
+@keyframes voiceHaloPulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.75;
+  }
+  50% {
+    transform: scale(1.045);
+    opacity: 1;
+  }
+}
+
+.animate-voice-halo {
+  animation: voiceHaloPulse 1.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+@keyframes shakeHorizontal {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+
+.animate-shake {
+  animation: shakeHorizontal 0.42s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+
+@keyframes flameGlow {
+  0%, 100% {
+    filter: drop-shadow(0 0 4px rgba(245, 158, 11, 0.45));
+    transform: scale(1);
+  }
+  50% {
+    filter: drop-shadow(0 0 10px rgba(var(--accent-rgb), 0.75));
+    transform: scale(1.1);
+  }
+}
+
+.animate-flame-glow {
+  animation: flameGlow 2s ease-in-out infinite;
+}
+
+@keyframes dashFlow {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+
+.animate-dash-flow {
+  stroke-dasharray: 6 6;
+  animation: dashFlow 1.2s linear infinite;
+}
+
+/* Interactive lift & theme accent border glow */
+.btn-tactile {
+  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 150ms cubic-bezier(0.16, 1, 0.3, 1), border-color 150ms ease, background-color 150ms ease;
+}
+.btn-tactile:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 14px -2px rgba(var(--accent-rgb), 0.28);
+}
+.btn-tactile:active:not(:disabled) {
+  transform: translateY(0px) scale(0.98);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-voice-halo,
+  .animate-shake,
+  .animate-flame-glow,
+  .animate-dash-flow {
+    animation: none;
+  }
+  .btn-tactile:hover:not(:disabled) {
+    transform: none;
+  }
+}

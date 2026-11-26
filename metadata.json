@@ -1,0 +1,6 @@
+{
+  "name": "DataForge DE — Tier-1 Data Engineering Interview Prep",
+  "description": "Data Engineering Interview Preparation Platform with 1,400 Tier-1 questions across 14 tracks, in-browser SQL/Python/Architecture/Modeling workspaces, 50 Google Mock Interviews, and Study AI Copilot.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
