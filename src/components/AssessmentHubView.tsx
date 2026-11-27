@@ -28,9 +28,12 @@ import {
 } from '../utils/liveAudio';
 import { AnimeCharacterAvatar } from './visuals/AnimeCharacterAvatar';
 import { CelebrationBurst } from './visuals/CelebrationAndBadges';
+import { findQuestContextByMockNumber } from '../data/questBriefings';
+import { QuestStudyBriefingView } from './QuestStudyBriefingView';
 import {
   AlertTriangle,
   Award,
+  BookOpen,
   CheckCircle2,
   ChevronRight,
   Clock,
@@ -60,6 +63,7 @@ interface AssessmentHubViewProps {
   onClearCustomMock?: () => void;
   onRecordMock: (record: MockAttemptRecord) => void;
   onJumpToTrack: (trackId: TrackId) => void;
+  onMarkBriefingRead?: (levelId: string, read: boolean) => void;
 }
 
 interface TranscriptTurn {
@@ -96,11 +100,17 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
   onClearCustomMock,
   onRecordMock,
   onJumpToTrack,
+  onMarkBriefingRead,
 }) => {
   const [selectedTierFilter, setSelectedTierFilter] = useState<'ALL' | MockTierName>('ALL');
   const [selectedRoundFilter, setSelectedRoundFilter] = useState<'ALL' | GoogleRoundId>('ALL');
   const [selectedCompanyTab, setSelectedCompanyTab] = useState<string>('google');
   const [targetLevel, setTargetLevel] = useState<'L3/L4' | 'L5'>('L3/L4');
+  const [mockSubView, setMockSubView] = useState<'studio' | 'briefing'>('studio');
+
+  useEffect(() => {
+    setMockSubView('studio');
+  }, [activeMockNumber, customMockOverride]);
 
   const activeMock: MockInterviewRound | undefined = customMockOverride
     ? customMockOverride
@@ -871,6 +881,11 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
 
   // Render Live 6-Round Face-to-Face AI Google Mock Studio
   if (activeMock && activeRoundStep && currentInterviewer) {
+    const questMockContext = findQuestContextByMockNumber(activeMock.mockNumber);
+    const isBriefingRead = questMockContext
+      ? (progress.readQuestBriefingIds || []).includes(questMockContext.level.id)
+      : false;
+
     return (
       <div className="space-y-4 relative">
         <CelebrationBurst
@@ -888,6 +903,36 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
             <h1 className="text-base font-bold text-primary">{activeMock.title}</h1>
           </div>
           <div className="flex flex-wrap items-center gap-2.5">
+            {questMockContext && (
+              <div className="flex items-center p-0.5 rounded-lg border border-subtle bg-canvas text-[11px] font-semibold">
+                <button
+                  type="button"
+                  onClick={() => setMockSubView('studio')}
+                  className={`px-2.5 py-1 rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                    mockSubView === 'studio'
+                      ? 'bg-accent text-accent-contrast'
+                      : 'text-muted hover:text-primary'
+                  }`}
+                >
+                  🎯 Interview Studio
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMockSubView('briefing')}
+                  className={`px-2.5 py-1 rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 ${
+                    mockSubView === 'briefing'
+                      ? 'bg-accent text-accent-contrast'
+                      : 'text-muted hover:text-primary'
+                  }`}
+                >
+                  <BookOpen className="w-3 h-3" />
+                  <span>📖 Study Briefing</span>
+                  {isBriefingRead && mockSubView !== 'briefing' && (
+                    <span className="text-[10px] text-[#10B981]">✓</span>
+                  )}
+                </button>
+              </div>
+            )}
             <div className="flex items-center p-0.5 rounded-lg border border-subtle bg-canvas text-[11px] font-semibold">
               <button
                 type="button"
@@ -970,6 +1015,7 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
             </button>
             <button
               onClick={() => {
+                setMockSubView('studio');
                 stopLiveVoiceSession(true);
                 onClearCustomMock?.();
                 onSelectMockNumber(null);
@@ -982,6 +1028,18 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
           </div>
         </div>
 
+        {questMockContext && mockSubView === 'briefing' && (
+          <QuestStudyBriefingView
+            quest={questMockContext.quest}
+            level={questMockContext.level}
+            mode="workspace-tab"
+            isRead={isBriefingRead}
+            onToggleRead={(read) => onMarkBriefingRead?.(questMockContext.level.id, read)}
+            onReturnToChallenge={() => setMockSubView('studio')}
+          />
+        )}
+
+        <div className={questMockContext && mockSubView === 'briefing' ? 'hidden' : 'space-y-4'}>
         {/* 6-Round Sequential Google Loop Stepper */}
         <div className="rounded-xl border border-subtle bg-card p-3 flex flex-wrap items-center gap-2">
           {activeMock.sixRounds.map((step, idx) => {
@@ -1522,6 +1580,7 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
               </div>
             </div>
           </div>
+        </div>
         </div>
       </div>
     );

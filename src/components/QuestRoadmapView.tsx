@@ -10,7 +10,6 @@ import {
   FileText,
   Link2,
   Lock,
-  Play,
   Satellite,
   ShieldCheck,
   Sparkles,
@@ -27,13 +26,20 @@ import {
   QuestLevelDefinition,
   TOTAL_QUEST_LEVELS,
 } from '../data/quests';
+import { BookOpen } from 'lucide-react';
 import { Question, UserProgressState } from '../types/platform';
+import { QuestLevelContext } from '../data/questBriefings';
+import { QuestStudyBriefingView } from './QuestStudyBriefingView';
 
 interface QuestRoadmapViewProps {
   progress: UserProgressState;
-  onOpenQuestion: (question: Question, options?: { plainTextDocMode?: boolean }) => void;
-  onLaunchMock: (mockNumber: number) => void;
-  onOpenCarlBank: () => void;
+  onMarkBriefingRead: (levelId: string, read: boolean) => void;
+  onOpenQuestion: (
+    question: Question,
+    options?: { plainTextDocMode?: boolean; questContext?: QuestLevelContext }
+  ) => void;
+  onLaunchMock: (mockNumber: number, questContext?: QuestLevelContext) => void;
+  onOpenCarlBank: (questContext?: QuestLevelContext) => void;
 }
 
 const QUEST_ICONS: Record<QuestIconId, React.ComponentType<{ className?: string }>> = {
@@ -48,13 +54,20 @@ const QUEST_ICONS: Record<QuestIconId, React.ComponentType<{ className?: string 
 
 export const QuestRoadmapView: React.FC<QuestRoadmapViewProps> = ({
   progress,
+  onMarkBriefingRead,
   onOpenQuestion,
   onLaunchMock,
   onOpenCarlBank,
 }) => {
   const [selectedQuestId, setSelectedQuestId] = useState<string | null>(null);
+  const [preflightTarget, setPreflightTarget] = useState<QuestLevelContext | null>(null);
   const [docModeByLevel, setDocModeByLevel] = useState<Record<string, boolean>>({});
   const [globalDocMode, setGlobalDocMode] = useState(false);
+
+  const readBriefingSet = useMemo(
+    () => new Set(progress.readQuestBriefingIds || []),
+    [progress.readQuestBriefingIds]
+  );
 
   const questionMap = useMemo(() => {
     const map = new Map<string, Question>();
@@ -112,23 +125,29 @@ export const QuestRoadmapView: React.FC<QuestRoadmapViewProps> = ({
     });
   };
 
-  const handleLaunchLevel = (level: QuestLevelDefinition) => {
+  const openStage1Briefing = (quest: QuestDefinition, level: QuestLevelDefinition) => {
+    setPreflightTarget({ quest, level });
+  };
+
+  const handleConfirmStartChallenge = (quest: QuestDefinition, level: QuestLevelDefinition) => {
+    onMarkBriefingRead(level.id, true);
+    const questContext: QuestLevelContext = { quest, level };
+    setPreflightTarget(null);
+    setSelectedQuestId(null);
+
     if (level.kind === 'carl') {
-      setSelectedQuestId(null);
-      onOpenCarlBank();
+      onOpenCarlBank(questContext);
       return;
     }
     if (level.kind === 'mock' && level.mockNumber !== undefined) {
-      setSelectedQuestId(null);
-      onLaunchMock(level.mockNumber);
+      onLaunchMock(level.mockNumber, questContext);
       return;
     }
     if (level.kind === 'question' && level.questionId) {
       const q = questionMap.get(level.questionId);
       if (q) {
         const useDocMode = Boolean(level.supportsGoogleDocMode && isDocModeForLevel(level.id));
-        setSelectedQuestId(null);
-        onOpenQuestion(q, { plainTextDocMode: useDocMode });
+        onOpenQuestion(q, { plainTextDocMode: useDocMode, questContext });
       }
     }
   };
@@ -469,20 +488,21 @@ export const QuestRoadmapView: React.FC<QuestRoadmapViewProps> = ({
                     ? questionMap.get(level.questionId)
                     : undefined;
                   const docModeOn = isDocModeForLevel(level.id);
+                  const isBriefingRead = readBriefingSet.has(level.id);
                   const isLast = idx === activeQuestBundle.summary.levelStates.length - 1;
 
                   const ctaLabel =
                     level.kind === 'carl'
                       ? completed
-                        ? 'Review CARL Story Bank'
-                        : `Open CARL Story Bank (${carlCount}/3)`
+                        ? 'Briefing & CARL Bank'
+                        : `Study Briefing -> CARL (${carlCount}/3)`
                       : level.kind === 'mock'
                       ? completed
-                        ? `Replay Mock #${String(level.mockNumber).padStart(2, '0')}`
-                        : `Start Mock #${String(level.mockNumber).padStart(2, '0')}`
+                        ? `Briefing & Mock #${String(level.mockNumber).padStart(2, '0')}`
+                        : `Briefing -> Mock #${String(level.mockNumber).padStart(2, '0')}`
                       : completed
-                      ? 'Review in Workspace'
-                      : 'Launch Level';
+                      ? 'Briefing & Workspace'
+                      : 'Read Briefing & Start';
 
                   return (
                     <div key={level.id} className="flex flex-col items-stretch">
@@ -542,7 +562,7 @@ export const QuestRoadmapView: React.FC<QuestRoadmapViewProps> = ({
                             </div>
                           </div>
 
-                          <div className="shrink-0">
+                          <div className="flex flex-col items-end gap-1 shrink-0">
                             {completed ? (
                               <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-[#10B981]/15 text-emerald-700 dark:text-[#10B981] border border-emerald-600/35">
                                 <Check className="w-3 h-3" /> Mastered
@@ -554,6 +574,11 @@ export const QuestRoadmapView: React.FC<QuestRoadmapViewProps> = ({
                             ) : (
                               <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-canvas text-muted border border-subtle">
                                 <Lock className="w-3 h-3" /> Locked
+                              </span>
+                            )}
+                            {isBriefingRead && (
+                              <span className="text-[10px] font-semibold text-emerald-600 dark:text-[#10B981] flex items-center gap-1">
+                                <BookOpen className="w-3 h-3" /> Briefing Read ✓
                               </span>
                             )}
                           </div>
@@ -596,14 +621,14 @@ export const QuestRoadmapView: React.FC<QuestRoadmapViewProps> = ({
                           {unlocked ? (
                             <button
                               type="button"
-                              onClick={() => handleLaunchLevel(level)}
+                              onClick={() => openStage1Briefing(activeQuestBundle.quest, level)}
                               className={`btn-tactile px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                                 completed
                                   ? 'bg-canvas border border-subtle text-primary hover:border-accent'
                                   : 'bg-accent text-accent-contrast hover:bg-accent-hover'
                               }`}
                             >
-                              <Play className="w-3.5 h-3.5" />
+                              <BookOpen className="w-3.5 h-3.5" />
                               <span>{ctaLabel}</span>
                               <ArrowRight className="w-3.5 h-3.5" />
                             </button>
@@ -648,6 +673,45 @@ export const QuestRoadmapView: React.FC<QuestRoadmapViewProps> = ({
                 })}
               </div>
             </motion.aside>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* 4. Stage 1: Mandatory Pre-Flight Study Briefing Modal */}
+      <AnimatePresence>
+        {preflightTarget && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setPreflightTarget(null)}
+              className="fixed inset-0 bg-black/75 backdrop-blur-xs z-50"
+            />
+            <motion.div
+              initial={{ opacity: 0, y: 16, scale: 0.985 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.985 }}
+              transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+              role="dialog"
+              aria-modal="true"
+              aria-label={`Study Briefing: ${preflightTarget.level.title}`}
+              className="fixed inset-3 sm:inset-6 lg:inset-x-10 lg:inset-y-6 max-w-6xl mx-auto rounded-2xl border border-subtle bg-canvas shadow-2xl z-50 overflow-hidden"
+            >
+              <QuestStudyBriefingView
+                quest={preflightTarget.quest}
+                level={preflightTarget.level}
+                mode="preflight"
+                isRead={readBriefingSet.has(preflightTarget.level.id)}
+                onToggleRead={(read) => onMarkBriefingRead(preflightTarget.level.id, read)}
+                onStartChallenge={() =>
+                  handleConfirmStartChallenge(preflightTarget.quest, preflightTarget.level)
+                }
+                onClosePreflight={() => setPreflightTarget(null)}
+                docModeOn={isDocModeForLevel(preflightTarget.level.id)}
+                onToggleDocMode={() => toggleLevelDocMode(preflightTarget.level.id)}
+              />
+            </motion.div>
           </>
         )}
       </AnimatePresence>

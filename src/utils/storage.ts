@@ -144,6 +144,7 @@ function getDefaultProgress(): UserProgressState {
     sm2Queue: {},
     carlStories: DEFAULT_CARL_STORIES,
     generatedDsaQuestions: [],
+    readQuestBriefingIds: [],
   };
 }
 
@@ -163,6 +164,9 @@ export function loadProgress(): UserProgressState {
           : DEFAULT_CARL_STORIES,
       generatedDsaQuestions: Array.isArray(parsed.generatedDsaQuestions)
         ? parsed.generatedDsaQuestions
+        : [],
+      readQuestBriefingIds: Array.isArray(parsed.readQuestBriefingIds)
+        ? parsed.readQuestBriefingIds
         : [],
     };
   } catch {
@@ -491,6 +495,25 @@ export function addGeneratedDsaQuestion(
   const next: UserProgressState = {
     ...prev,
     generatedDsaQuestions: [question, ...existing],
+  };
+  saveProgress(next);
+  return next;
+}
+
+export function markQuestBriefingRead(
+  prev: UserProgressState,
+  levelId: string,
+  read = true
+): UserProgressState {
+  const current = new Set(prev.readQuestBriefingIds || []);
+  if (read) {
+    current.add(levelId);
+  } else {
+    current.delete(levelId);
+  }
+  const next: UserProgressState = {
+    ...prev,
+    readQuestBriefingIds: Array.from(current),
   };
   saveProgress(next);
   return next;

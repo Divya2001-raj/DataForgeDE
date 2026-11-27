@@ -446,6 +446,7 @@ export interface UserProgressState {
   sm2Queue: Record<string, Sm2ReviewItem>;
   carlStories?: CarlStory[];
   generatedDsaQuestions?: Question[];
+  readQuestBriefingIds?: string[];
 }
 
 export interface AiProviderSettings {

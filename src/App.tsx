@@ -33,6 +33,7 @@ import {
   loadProgress,
   loadProviderSettings,
   loadTheme,
+  markQuestBriefingRead,
   recordMockAttempt,
   recordQuestionSubmission,
   saveCarlStory,
@@ -42,8 +43,10 @@ import {
   THEME_OPTIONS,
   updateTargetInterviewDate,
 } from './utils/storage';
+import { findQuestContextByQuestionId, QuestLevelContext } from './data/questBriefings';
 import { DashboardView } from './components/DashboardView';
 import { QuestRoadmapView } from './components/QuestRoadmapView';
+import { QuestStudyBriefingView } from './components/QuestStudyBriefingView';
 import { QuestionBankView } from './components/QuestionBankView';
 import { ConceptDrawer } from './components/ConceptDrawer';
 import { PatternMasterclassDrawer } from './components/PatternMasterclassDrawer';
@@ -55,7 +58,7 @@ import { ArchitectureWorkspace } from './components/workspaces/ArchitectureWorks
 import { ModelingWorkspace } from './components/workspaces/ModelingWorkspace';
 import { ConceptualWorkspace } from './components/workspaces/ConceptualWorkspace';
 import { AnimeCharacterAvatar } from './components/visuals/AnimeCharacterAvatar';
-import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Sparkles, Type } from 'lucide-react';
+import { ArrowLeft, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, Sparkles, Type } from 'lucide-react';
 
 type AppTab = 'dashboard' | 'quests' | 'bank' | 'workspace' | 'assessments';
 
@@ -72,6 +75,8 @@ export default function App() {
   const [activeMockNumber, setActiveMockNumber] = useState<number | null>(null);
   const [customMockOverride, setCustomMockOverride] = useState<MockInterviewRound | null>(null);
   const [launchPlainTextDocMode, setLaunchPlainTextDocMode] = useState(false);
+  const [activeQuestContext, setActiveQuestContext] = useState<QuestLevelContext | null>(null);
+  const [workspaceSubView, setWorkspaceSubView] = useState<'challenge' | 'briefing'>('challenge');
   const [behavioralStoryBankTrigger, setBehavioralStoryBankTrigger] = useState(0);
 
   const [progress, setProgress] = useState<UserProgressState>(() => loadProgress());
@@ -120,9 +125,11 @@ export default function App() {
 
   const openQuestionInWorkspace = (
     q: Question,
-    options?: { plainTextDocMode?: boolean }
+    options?: { plainTextDocMode?: boolean; questContext?: QuestLevelContext }
   ) => {
     setLaunchPlainTextDocMode(Boolean(options?.plainTextDocMode));
+    setActiveQuestContext(options?.questContext || null);
+    setWorkspaceSubView('challenge');
     setActiveQuestion(q);
     setSelectedTrackId(q.trackId);
     setCodeBuffer(q.starterCode || '');
@@ -132,6 +139,10 @@ export default function App() {
     setSchemaTables(q.modelingSpec?.starterTables || []);
     setSchemaRelations([]);
     setActiveTab('workspace');
+  };
+
+  const handleMarkBriefingRead = (levelId: string, read = true) => {
+    setProgress((prev) => markQuestBriefingRead(prev, levelId, read));
   };
 
   const handleSelectTrack = (trackId: TrackId) => {
@@ -493,13 +504,16 @@ export default function App() {
             {activeTab === 'quests' && (
               <QuestRoadmapView
                 progress={progress}
+                onMarkBriefingRead={handleMarkBriefingRead}
                 onOpenQuestion={openQuestionInWorkspace}
-                onLaunchMock={(num) => {
+                onLaunchMock={(num, questCtx) => {
+                  setActiveQuestContext(questCtx || null);
                   setCustomMockOverride(null);
                   setActiveMockNumber(num);
                   setActiveTab('assessments');
                 }}
-                onOpenCarlBank={() => {
+                onOpenCarlBank={(questCtx) => {
+                  setActiveQuestContext(questCtx || null);
                   setSelectedTrackId('behavioral');
                   setBehavioralStoryBankTrigger((n) => n + 1);
                   setActiveTab('bank');
@@ -521,41 +535,116 @@ export default function App() {
                   setProgress((prev) => addGeneratedDsaQuestion(prev, q))
                 }
                 behavioralStoryBankTrigger={behavioralStoryBankTrigger}
+                onMarkBriefingRead={handleMarkBriefingRead}
               />
             )}
 
-            {activeTab === 'workspace' && (
+            {activeTab === 'workspace' && (() => {
+              const resolvedQuestContext =
+                activeQuestContext && activeQuestContext.level.questionId === activeQuestion.id
+                  ? activeQuestContext
+                  : findQuestContextByQuestionId(activeQuestion.id);
+              const isBriefingRead = resolvedQuestContext
+                ? (progress.readQuestBriefingIds || []).includes(resolvedQuestContext.level.id)
+                : false;
+
+              return (
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <button
-                    onClick={() => setActiveTab('bank')}
-                    className="btn-tactile text-xs font-semibold text-muted hover:text-accent flex items-center gap-1"
-                  >
-                    <ArrowLeft className="w-3.5 h-3.5" />
-                    Back to {TRACKS.find((t) => t.id === activeQuestion.trackId)?.shortName}
-                  </button>
+                  <div className="flex flex-wrap items-center gap-3">
+                    {activeQuestContext && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('quests')}
+                        className="btn-tactile px-2.5 py-1 rounded-lg border border-subtle bg-card text-xs font-semibold text-primary hover:border-accent flex items-center gap-1 whitespace-nowrap shrink-0"
+                      >
+                        <ArrowLeft className="w-3.5 h-3.5 text-accent" />
+                        Quest Roadmap
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setActiveTab('bank')}
+                      className="btn-tactile text-xs font-semibold text-muted hover:text-accent flex items-center gap-1 whitespace-nowrap shrink-0"
+                    >
+                      <ArrowLeft className="w-3.5 h-3.5" />
+                      Back to {TRACKS.find((t) => t.id === activeQuestion.trackId)?.shortName}
+                    </button>
+                  </div>
 
-                  <div className="flex items-center gap-2 text-xs">
-                    <button
-                      disabled={activeIndex <= 0}
-                      onClick={() => goNeighborQuestion(-1)}
-                      className="btn-tactile px-2.5 py-1 rounded-lg border border-subtle disabled:opacity-40 hover:border-accent flex items-center gap-1"
-                    >
-                      <ChevronLeft className="w-3.5 h-3.5" /> Prev
-                    </button>
-                    <span className="font-mono text-muted tabular-nums">
-                      {activeIndex + 1} / {trackQuestions.length}
-                    </span>
-                    <button
-                      disabled={activeIndex >= trackQuestions.length - 1}
-                      onClick={() => goNeighborQuestion(1)}
-                      className="btn-tactile px-2.5 py-1 rounded-lg border border-subtle disabled:opacity-40 hover:border-accent flex items-center gap-1"
-                    >
-                      Next <ChevronRight className="w-3.5 h-3.5" />
-                    </button>
+                  <div className="flex flex-wrap items-center gap-3">
+                    {resolvedQuestContext && (
+                      <div
+                        role="tablist"
+                        aria-label="Workspace View Mode"
+                        className="flex items-center p-0.5 rounded-lg border border-subtle bg-card text-xs font-semibold"
+                      >
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={workspaceSubView === 'challenge'}
+                          onClick={() => setWorkspaceSubView('challenge')}
+                          className={`px-3 py-1 rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                            workspaceSubView === 'challenge'
+                              ? 'bg-accent text-accent-contrast shadow-xs'
+                              : 'text-muted hover:text-primary'
+                          }`}
+                        >
+                          ⚡ Challenge Workspace
+                        </button>
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={workspaceSubView === 'briefing'}
+                          onClick={() => setWorkspaceSubView('briefing')}
+                          className={`px-3 py-1 rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                            workspaceSubView === 'briefing'
+                              ? 'bg-accent text-accent-contrast shadow-xs'
+                              : 'text-muted hover:text-primary'
+                          }`}
+                        >
+                          <BookOpen className="w-3.5 h-3.5" />
+                          <span>📖 Study Briefing</span>
+                          {isBriefingRead && workspaceSubView !== 'briefing' && (
+                            <Check className="w-3 h-3 text-[#10B981]" />
+                          )}
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-2 text-xs">
+                      <button
+                        disabled={activeIndex <= 0}
+                        onClick={() => goNeighborQuestion(-1)}
+                        className="btn-tactile px-2.5 py-1 rounded-lg border border-subtle disabled:opacity-40 hover:border-accent flex items-center gap-1"
+                      >
+                        <ChevronLeft className="w-3.5 h-3.5" /> Prev
+                      </button>
+                      <span className="font-mono text-muted tabular-nums">
+                        {activeIndex + 1} / {trackQuestions.length}
+                      </span>
+                      <button
+                        disabled={activeIndex >= trackQuestions.length - 1}
+                        onClick={() => goNeighborQuestion(1)}
+                        className="btn-tactile px-2.5 py-1 rounded-lg border border-subtle disabled:opacity-40 hover:border-accent flex items-center gap-1"
+                      >
+                        Next <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
                 </div>
 
+                {resolvedQuestContext && workspaceSubView === 'briefing' && (
+                  <QuestStudyBriefingView
+                    quest={resolvedQuestContext.quest}
+                    level={resolvedQuestContext.level}
+                    mode="workspace-tab"
+                    isRead={isBriefingRead}
+                    onToggleRead={(read) => handleMarkBriefingRead(resolvedQuestContext.level.id, read)}
+                    onReturnToChallenge={() => setWorkspaceSubView('challenge')}
+                  />
+                )}
+
+                <div className={resolvedQuestContext && workspaceSubView === 'briefing' ? 'hidden' : ''}>
                 {activeQuestion.workspaceType === 'ide' && (
                   <IdeWorkspace
                     question={activeQuestion}
@@ -610,8 +699,10 @@ export default function App() {
                     isSolved={solvedSet.has(activeQuestion.id)}
                   />
                 )}
+                </div>
               </div>
-            )}
+              );
+            })()}
 
             {activeTab === 'assessments' && (
               <AssessmentHubView
@@ -622,6 +713,7 @@ export default function App() {
                 onClearCustomMock={() => setCustomMockOverride(null)}
                 onRecordMock={handleRecordMock}
                 onJumpToTrack={handleSelectTrack}
+                onMarkBriefingRead={handleMarkBriefingRead}
               />
             )}
           </motion.div>

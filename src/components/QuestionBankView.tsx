@@ -15,6 +15,8 @@ import { DSA_PATTERN_GUIDES } from '../data/dsaPatterns';
 import { sanitizeAiErrorMessage } from '../utils/storage';
 import { generateDsaProblem } from '../services/geminiAiService';
 import { CarlStoryBank } from './CarlStoryBank';
+import { findQuestContextByLevelId } from '../data/questBriefings';
+import { QuestStudyBriefingView } from './QuestStudyBriefingView';
 import {
   BookOpen,
   CheckCircle2,
@@ -38,6 +40,7 @@ interface QuestionBankViewProps {
   onDeleteCarlStory: (storyId: string) => void;
   onAddGeneratedDsaQuestion: (question: Question) => void;
   behavioralStoryBankTrigger?: number;
+  onMarkBriefingRead?: (levelId: string, read: boolean) => void;
 }
 
 const PAGE_SIZE = 25;
@@ -53,6 +56,7 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({
   onDeleteCarlStory,
   onAddGeneratedDsaQuestion,
   behavioralStoryBankTrigger = 0,
+  onMarkBriefingRead,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDiffs, setSelectedDiffs] = useState<Difficulty[]>([]);
@@ -63,10 +67,12 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({
   const [page, setPage] = useState(1);
   const [showCompanyFilters, setShowCompanyFilters] = useState(false);
   const [behavioralSubTab, setBehavioralSubTab] = useState<'questions' | 'storybank'>('questions');
+  const [carlBriefingView, setCarlBriefingView] = useState<'stories' | 'briefing'>('stories');
 
   useEffect(() => {
     if (behavioralStoryBankTrigger > 0) {
       setBehavioralSubTab('storybank');
+      setCarlBriefingView('stories');
     }
   }, [behavioralStoryBankTrigger]);
 
@@ -559,11 +565,69 @@ export const QuestionBankView: React.FC<QuestionBankViewProps> = ({
         )}
 
         {selectedTrackId === 'behavioral' && behavioralSubTab === 'storybank' ? (
-          <CarlStoryBank
-            stories={progress.carlStories || []}
-            onSaveStory={onSaveCarlStory}
-            onDeleteStory={onDeleteCarlStory}
-          />
+          (() => {
+            const carlCtx = findQuestContextByLevelId('q7-l5');
+            const isCarlRead = carlCtx
+              ? (progress.readQuestBriefingIds || []).includes(carlCtx.level.id)
+              : false;
+            return (
+              <div className="space-y-4">
+                {carlCtx && (
+                  <div className="rounded-xl border border-subtle bg-card px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-muted">
+                      Quest 07 · Level 05 · CARL Consulting Story Bank
+                    </span>
+                    <div className="flex items-center p-0.5 rounded-lg border border-subtle bg-canvas text-xs font-semibold">
+                      <button
+                        type="button"
+                        onClick={() => setCarlBriefingView('stories')}
+                        className={`px-3 py-1 rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                          carlBriefingView === 'stories'
+                            ? 'bg-accent text-accent-contrast'
+                            : 'text-muted hover:text-primary'
+                        }`}
+                      >
+                        📝 CARL Story Bank
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCarlBriefingView('briefing')}
+                        className={`px-3 py-1 rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 ${
+                          carlBriefingView === 'briefing'
+                            ? 'bg-accent text-accent-contrast'
+                            : 'text-muted hover:text-primary'
+                        }`}
+                      >
+                        <span>📖 Study Briefing</span>
+                        {isCarlRead && carlBriefingView !== 'briefing' && (
+                          <span className="text-[10px] text-[#10B981]">✓</span>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {carlCtx && carlBriefingView === 'briefing' && (
+                  <QuestStudyBriefingView
+                    quest={carlCtx.quest}
+                    level={carlCtx.level}
+                    mode="workspace-tab"
+                    isRead={isCarlRead}
+                    onToggleRead={(read) => onMarkBriefingRead?.(carlCtx.level.id, read)}
+                    onReturnToChallenge={() => setCarlBriefingView('stories')}
+                  />
+                )}
+
+                <div className={carlBriefingView === 'briefing' ? 'hidden' : ''}>
+                  <CarlStoryBank
+                    stories={progress.carlStories || []}
+                    onSaveStory={onSaveCarlStory}
+                    onDeleteStory={onDeleteCarlStory}
+                  />
+                </div>
+              </div>
+            );
+          })()
         ) : (
         <div className="rounded-xl border border-subtle bg-card overflow-hidden">
           <div className="px-4 py-2.5 border-b border-subtle flex items-center justify-between text-xs text-muted tabular-nums">
