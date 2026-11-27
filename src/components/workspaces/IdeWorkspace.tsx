@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   DsaPattern,
   Question,
@@ -13,6 +13,9 @@ import {
   SqlExplainStep,
 } from '../../utils/sqlRunner';
 import { PythonExecutionResult, runPythonInBrowser } from '../../utils/pythonRunner';
+import { transcribeAudioBlob } from '../../services/geminiAiService';
+import { AudioRecordingHandle, startMicRecording } from '../../utils/liveAudio';
+import { sanitizeAiErrorMessage } from '../../utils/storage';
 import { AnimatedConceptDiagram } from '../visuals/AnimatedConceptDiagram';
 import { CelebrationBurst } from '../visuals/CelebrationAndBadges';
 import { FollowUpsSection } from './FollowUpsSection';
@@ -24,9 +27,11 @@ import {
   Clock,
   FileText,
   MessageSquare,
+  Mic,
   Play,
   RotateCcw,
   Sparkles,
+  Square,
   Terminal,
   Trash2,
   XCircle,
@@ -41,12 +46,13 @@ interface IdeWorkspaceProps {
   onAskCopilot: (prompt: string) => void;
   onRecordSubmission: (
     passed: boolean,
-    meta?: { runtimeMs?: number; language?: string; codeSnapshot?: string }
+    meta?: { runtimeMs?: number; language?: string; codeSnapshot?: string; failedHints?: string[] }
   ) => void;
   isSolved: boolean;
   submissions?: QuestionSubmissionRecord[];
   discussions?: Array<{ id: string; author: string; text: string; createdAt: string }>;
   onAddDiscussion?: (text: string) => void;
+  initialPlainTextDocMode?: boolean;
 }
 
 function parseDdlColumns(ddl: string): Array<{ tableName: string; columns: Array<{ name: string; type: string }> }> {
@@ -84,6 +90,7 @@ export const IdeWorkspace: React.FC<IdeWorkspaceProps> = ({
   submissions = [],
   discussions = [],
   onAddDiscussion,
+  initialPlainTextDocMode = false,
 }) => {
   const defaultLang: 'sql' | 'python' | 'pyspark' =
     question.language === 'pyspark'
@@ -103,7 +110,7 @@ export const IdeWorkspace: React.FC<IdeWorkspaceProps> = ({
   const [solutionUnlocked, setSolutionUnlocked] = useState(false);
   const [selectedApproachIdx, setSelectedApproachIdx] = useState(0);
   const [debugMode, setDebugMode] = useState(false);
-  const [plainTextDocMode, setPlainTextDocMode] = useState(false);
+  const [plainTextDocMode, setPlainTextDocMode] = useState(Boolean(initialPlainTextDocMode));
 
   const [bottomTab, setBottomTab] = useState<'testcase' | 'result' | 'plan'>('testcase');
   const [activeCaseIdx, setActiveCaseIdx] = useState(0);
@@ -119,6 +126,43 @@ export const IdeWorkspace: React.FC<IdeWorkspaceProps> = ({
   const [submitMessage, setSubmitMessage] = useState<string | null>(null);
   const [showCelebration, setShowCelebration] = useState(false);
   const [discussionInput, setDiscussionInput] = useState('');
+  const [isRecordingNote, setIsRecordingNote] = useState(false);
+  const [isTranscribingNote, setIsTranscribingNote] = useState(false);
+  const [noteVoiceError, setNoteVoiceError] = useState<string | null>(null);
+  const noteRecRef = useRef<AudioRecordingHandle | null>(null);
+
+  const handleToggleVoiceDiscussion = async () => {
+    if (isTranscribingNote) return;
+    if (isRecordingNote && noteRecRef.current) {
+      const handle = noteRecRef.current;
+      noteRecRef.current = null;
+      setIsRecordingNote(false);
+      setIsTranscribingNote(true);
+      setNoteVoiceError(null);
+      try {
+        const blob = await handle.stop();
+        const res = await transcribeAudioBlob(blob, `${question.title} (${question.concept})`);
+        const text = res.transcript.trim();
+        if (text) {
+          setDiscussionInput((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text));
+        }
+      } catch (err: unknown) {
+        setNoteVoiceError(sanitizeAiErrorMessage(err, 'Audio transcription failed.'));
+      } finally {
+        setIsTranscribingNote(false);
+      }
+      return;
+    }
+
+    try {
+      setNoteVoiceError(null);
+      const handle = await startMicRecording();
+      noteRecRef.current = handle;
+      setIsRecordingNote(true);
+    } catch (err: unknown) {
+      setNoteVoiceError(sanitizeAiErrorMessage(err, 'Microphone permission denied.'));
+    }
+  };
 
   const ddlTables = useMemo(() => parseDdlColumns(dataset.ddl), [dataset.ddl]);
 
@@ -142,15 +186,22 @@ export const IdeWorkspace: React.FC<IdeWorkspaceProps> = ({
     setSolutionUnlocked(false);
     setSelectedApproachIdx(0);
     setDebugMode(false);
+    setPlainTextDocMode(Boolean(initialPlainTextDocMode));
     setBottomTab('testcase');
     setActiveCaseIdx(0);
+    setNoteVoiceError(null);
+    if (noteRecRef.current) {
+      noteRecRef.current.cancel();
+      noteRecRef.current = null;
+      setIsRecordingNote(false);
+    }
 
     if (lang === 'sql') {
       getDatasetPreview(datasetId)
         .then(setTablePreviews)
         .catch(() => setTablePreviews([]));
     }
-  }, [question.id, datasetId, question.language, question.datasetId]);
+  }, [question.id, datasetId, question.language, question.datasetId, initialPlainTextDocMode]);
 
   const triggerCelebration = () => {
     setShowCelebration(true);
@@ -184,10 +235,14 @@ export const IdeWorkspace: React.FC<IdeWorkspaceProps> = ({
 
       const allPassed = res.success && res.testResults.every((t) => t.passed);
       if (isSubmit) {
+        const failedHints = res.testResults
+          .filter((t) => !t.passed)
+          .map((t) => `${t.name} ${t.detail || ''}`);
         onRecordSubmission(allPassed, {
           runtimeMs: res.executionMs,
           language: selectedLang,
           codeSnapshot: code,
+          failedHints: res.error ? [res.error, ...failedHints] : failedHints,
         });
         if (allPassed) triggerCelebration();
         setSubmitMessage(
@@ -202,10 +257,14 @@ export const IdeWorkspace: React.FC<IdeWorkspaceProps> = ({
       setSqlResult(null);
       const allPassed = res.success && res.testResults.every((t) => t.passed);
       if (isSubmit) {
+        const failedHints = res.testResults
+          .filter((t) => !t.passed)
+          .map((t) => `${t.name} ${t.description || ''} ${t.expected || ''}`);
         onRecordSubmission(allPassed, {
           runtimeMs: res.executionMs,
           language: selectedLang,
           codeSnapshot: code,
+          failedHints: res.error ? [res.error, ...failedHints] : failedHints,
         });
         if (allPassed) triggerCelebration();
         setSubmitMessage(
@@ -560,7 +619,7 @@ export const IdeWorkspace: React.FC<IdeWorkspaceProps> = ({
                               <li key={wi}>• {w}</li>
                             ))}
                           </ul>
-                          <pre className="p-3 rounded-lg bg-[#09090B] text-emerald-300 border border-[#27272A] font-mono text-[11px] overflow-x-auto leading-[1.6]">
+                          <pre className="p-3 rounded-lg bg-editor text-primary border border-subtle font-mono text-[11px] overflow-x-auto leading-[1.6]">
                             {activeApproach.code}
                           </pre>
                         </div>
@@ -615,29 +674,56 @@ export const IdeWorkspace: React.FC<IdeWorkspaceProps> = ({
               </div>
 
               {onAddDiscussion && (
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (!discussionInput.trim()) return;
-                    onAddDiscussion(discussionInput.trim());
-                    setDiscussionInput('');
-                  }}
-                  className="flex gap-2"
-                >
-                  <input
-                    type="text"
-                    value={discussionInput}
-                    onChange={(e) => setDiscussionInput(e.target.value)}
-                    placeholder="Add your edge-case takeaway..."
-                    className="flex-1 px-3 py-2 rounded-lg border border-subtle bg-canvas text-primary"
-                  />
-                  <button
-                    type="submit"
-                    className="btn-tactile px-3 py-2 rounded-lg bg-accent text-accent-contrast font-bold hover:bg-accent-hover"
+                <div className="space-y-1.5">
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (!discussionInput.trim()) return;
+                      onAddDiscussion(discussionInput.trim());
+                      setDiscussionInput('');
+                    }}
+                    className="flex gap-2"
                   >
-                    Post
-                  </button>
-                </form>
+                    <button
+                      type="button"
+                      disabled={isTranscribingNote}
+                      onClick={handleToggleVoiceDiscussion}
+                      title="Record Voice Takeaway (Gemini Transcribe)"
+                      className={`btn-tactile px-2.5 py-2 rounded-lg border text-xs font-semibold flex items-center gap-1 shrink-0 ${
+                        isRecordingNote
+                          ? 'bg-[#EF4444] text-white border-[#EF4444]'
+                          : 'border-subtle bg-canvas text-muted hover:border-accent hover:text-primary'
+                      }`}
+                    >
+                      {isRecordingNote ? (
+                        <Square className="w-3.5 h-3.5 fill-current" />
+                      ) : (
+                        <Mic className="w-3.5 h-3.5 text-accent" />
+                      )}
+                      {isRecordingNote ? 'Stop' : isTranscribingNote ? '...' : 'Voice'}
+                    </button>
+                    <input
+                      type="text"
+                      value={discussionInput}
+                      onChange={(e) => setDiscussionInput(e.target.value)}
+                      placeholder={
+                        isRecordingNote
+                          ? 'Recording takeaway...'
+                          : 'Add or dictate your edge-case takeaway...'
+                      }
+                      className="flex-1 px-3 py-2 rounded-lg border border-subtle bg-canvas text-primary"
+                    />
+                    <button
+                      type="submit"
+                      className="btn-tactile px-3 py-2 rounded-lg bg-accent text-accent-contrast font-bold hover:bg-accent-hover"
+                    >
+                      Post
+                    </button>
+                  </form>
+                  {noteVoiceError && (
+                    <div className="text-[11px] text-[#EF4444]">{noteVoiceError}</div>
+                  )}
+                </div>
               )}
 
               <div className="space-y-2">
@@ -762,7 +848,7 @@ export const IdeWorkspace: React.FC<IdeWorkspaceProps> = ({
           </div>
         )}
 
-        <div className={`flex-1 min-h-[260px] p-3 ${plainTextDocMode ? 'bg-white dark:bg-[#18181B]' : 'bg-[#09090B]'}`}>
+        <div className={`flex-1 min-h-[260px] p-3 ${plainTextDocMode ? 'bg-elevated' : 'bg-editor'}`}>
           <textarea
             value={code}
             onChange={(e) => onChangeCode(e.target.value)}
@@ -786,8 +872,8 @@ export const IdeWorkspace: React.FC<IdeWorkspaceProps> = ({
             aria-label="Code and SQL Editor"
             className={`w-full h-full min-h-[240px] text-xs leading-[1.6] tracking-normal resize-none focus:outline-none p-3 ${
               plainTextDocMode
-                ? 'bg-white dark:bg-[#18181B] text-[#09090B] dark:text-zinc-200 font-sans border border-zinc-200 dark:border-zinc-700 rounded-md shadow-inner'
-                : 'bg-[#09090B] text-zinc-100 font-mono'
+                ? 'bg-canvas text-primary font-sans border border-subtle rounded-md shadow-inner'
+                : 'bg-editor text-primary font-mono'
             }`}
           />
         </div>

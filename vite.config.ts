@@ -11,7 +11,7 @@ export default defineConfig(() => {
       tailwindcss(),
       // Copies src/assets into dist/ so root-relative URLs like
       // "/src/assets/images/..." (e.g. generate_image output) still resolve
-      // in production builds. Do not remove.
+      // in production builds. Also copies sql-wasm.wasm for client-only SQL execution.
       {
         name: 'copy-unbundled-src-assets',
         apply: 'build',
@@ -24,6 +24,11 @@ export default defineConfig(() => {
           const distAssets = path.resolve(distDir, 'src/assets');
           if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
             fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
+          }
+          const wasmSrc = path.resolve(__dirname, 'node_modules/sql.js/dist/sql-wasm.wasm');
+          const wasmDest = path.resolve(distDir, 'sql-wasm.wasm');
+          if (fs.existsSync(distDir) && fs.existsSync(wasmSrc)) {
+            fs.copyFileSync(wasmSrc, wasmDest);
           }
         },
       },

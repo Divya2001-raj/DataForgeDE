@@ -25,6 +25,7 @@ import {
   addDiscussionComment,
   addGeneratedDsaQuestion,
   addStudyNote,
+  clearBlindSpots,
   deleteCarlStory,
   deleteStudyNote,
   FONT_PRESETS,
@@ -39,24 +40,28 @@ import {
   saveProviderSettings,
   saveTheme,
   THEME_OPTIONS,
+  updateTargetInterviewDate,
 } from './utils/storage';
 import { DashboardView } from './components/DashboardView';
+import { QuestRoadmapView } from './components/QuestRoadmapView';
 import { QuestionBankView } from './components/QuestionBankView';
 import { ConceptDrawer } from './components/ConceptDrawer';
 import { PatternMasterclassDrawer } from './components/PatternMasterclassDrawer';
 import { StudyCopilotDrawer, CopilotContextSnapshot } from './components/StudyCopilotDrawer';
 import { AssessmentHubView } from './components/AssessmentHubView';
+import { ThemeSwitcherPopover } from './components/ThemeSwitcherPopover';
 import { IdeWorkspace } from './components/workspaces/IdeWorkspace';
 import { ArchitectureWorkspace } from './components/workspaces/ArchitectureWorkspace';
 import { ModelingWorkspace } from './components/workspaces/ModelingWorkspace';
 import { ConceptualWorkspace } from './components/workspaces/ConceptualWorkspace';
 import { AnimeCharacterAvatar } from './components/visuals/AnimeCharacterAvatar';
-import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Palette, Sparkles, Type } from 'lucide-react';
+import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Sparkles, Type } from 'lucide-react';
 
-type AppTab = 'dashboard' | 'bank' | 'workspace' | 'assessments';
+type AppTab = 'dashboard' | 'quests' | 'bank' | 'workspace' | 'assessments';
 
 export default function App() {
   const [theme, setTheme] = useState<ThemeId>(() => loadTheme());
+  const [previewTheme, setPreviewTheme] = useState<ThemeId | null>(null);
   const [showThemeMenu, setShowThemeMenu] = useState(false);
   const [fontPreset, setFontPreset] = useState<FontPreset>(() => loadFontPreset());
   const [showFontMenu, setShowFontMenu] = useState(false);
@@ -66,6 +71,8 @@ export default function App() {
   const [activeQuestion, setActiveQuestion] = useState<Question>(QUESTIONS_BY_TRACK.sql[0]);
   const [activeMockNumber, setActiveMockNumber] = useState<number | null>(null);
   const [customMockOverride, setCustomMockOverride] = useState<MockInterviewRound | null>(null);
+  const [launchPlainTextDocMode, setLaunchPlainTextDocMode] = useState(false);
+  const [behavioralStoryBankTrigger, setBehavioralStoryBankTrigger] = useState(0);
 
   const [progress, setProgress] = useState<UserProgressState>(() => loadProgress());
   const [providerSettings, setProviderSettings] = useState<AiProviderSettings>(() =>
@@ -84,22 +91,22 @@ export default function App() {
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [queuedCopilotPrompt, setQueuedCopilotPrompt] = useState<string | null>(null);
 
+  const effectiveTheme = previewTheme || theme;
+
   useEffect(() => {
     const root = document.documentElement;
-    const meta = THEME_OPTIONS.find((t) => t.id === theme) || THEME_OPTIONS[0];
+    const meta = THEME_OPTIONS.find((t) => t.id === effectiveTheme) || THEME_OPTIONS[0];
     if (meta.isDark) {
       root.classList.add('dark');
     } else {
       root.classList.remove('dark');
     }
-    root.setAttribute('data-theme', theme);
+    root.setAttribute('data-theme', effectiveTheme);
+  }, [effectiveTheme]);
+
+  useEffect(() => {
     saveTheme(theme);
   }, [theme]);
-
-  const activeThemeMeta = useMemo(
-    () => THEME_OPTIONS.find((t) => t.id === theme) || THEME_OPTIONS[0],
-    [theme]
-  );
 
   const activeFontMeta = useMemo(
     () => FONT_PRESETS.find((f) => f.id === fontPreset) || FONT_PRESETS[0],
@@ -111,7 +118,11 @@ export default function App() {
     saveFontPreset(fontPreset);
   }, [fontPreset]);
 
-  const openQuestionInWorkspace = (q: Question) => {
+  const openQuestionInWorkspace = (
+    q: Question,
+    options?: { plainTextDocMode?: boolean }
+  ) => {
+    setLaunchPlainTextDocMode(Boolean(options?.plainTextDocMode));
     setActiveQuestion(q);
     setSelectedTrackId(q.trackId);
     setCodeBuffer(q.starterCode || '');
@@ -131,12 +142,16 @@ export default function App() {
   const handleRecordSubmission = (
     question: Question,
     passed: boolean,
-    meta?: { runtimeMs?: number; language?: string; codeSnapshot?: string }
+    meta?: { runtimeMs?: number; language?: string; codeSnapshot?: string; failedHints?: string[] }
   ) => {
     setProgress((prev) =>
       recordQuestionSubmission(prev, question.id, passed, {
         title: question.title,
         trackId: question.trackId,
+        concept: question.concept,
+        tags: question.tags,
+        dsaPattern: question.dsaPattern,
+        failedHints: meta?.failedHints,
         runtimeMs: meta?.runtimeMs,
         language: meta?.language,
         codeSnapshot: meta?.codeSnapshot,
@@ -217,6 +232,8 @@ export default function App() {
       view:
         activeTab === 'dashboard'
           ? 'Progress & Readiness Dashboard'
+          : activeTab === 'quests'
+          ? 'Google Cloud DE Quest Roadmap'
           : activeTab === 'bank'
           ? `${TRACKS.length}-Track Question Bank`
           : activeTab === 'assessments'
@@ -275,6 +292,7 @@ export default function App() {
             {(
               [
                 { id: 'dashboard', label: '📊 Dashboard' },
+                { id: 'quests', label: '🗺️ Quest Roadmap' },
                 { id: 'bank', label: '📚 Question Bank' },
                 { id: 'workspace', label: '⚡ Workspace' },
                 { id: 'assessments', label: '🎯 Assessments' },
@@ -304,6 +322,7 @@ export default function App() {
                 onClick={() => {
                   setShowFontMenu(false);
                   setShowThemeMenu(false);
+                  setPreviewTheme(null);
                 }}
                 className="fixed inset-0 z-40"
               />
@@ -314,6 +333,7 @@ export default function App() {
               <button
                 onClick={() => {
                   setShowThemeMenu(false);
+                  setPreviewTheme(null);
                   setShowFontMenu((v) => !v);
                 }}
                 aria-label="Switch Typography Preset"
@@ -401,94 +421,25 @@ export default function App() {
               )}
             </div>
 
-            {/* 🎨 12-Theme Selector Dropdown */}
-            <div className="relative">
-              <button
-                onClick={() => {
-                  setShowFontMenu(false);
-                  setShowThemeMenu((v) => !v);
-                }}
-                aria-label="Select Color Theme"
-                aria-expanded={showThemeMenu}
-                title={`Theme: ${activeThemeMeta.name}`}
-                className="btn-tactile px-2.5 py-2 rounded-lg border border-subtle bg-card hover:border-accent text-xs font-bold flex items-center gap-1.5 text-primary whitespace-nowrap"
-              >
-                <span className="flex items-center -space-x-1 shrink-0">
-                  <span
-                    className="w-2.5 h-2.5 rounded-full border border-subtle"
-                    style={{ backgroundColor: activeThemeMeta.canvas }}
-                  />
-                  <span
-                    className="w-2.5 h-2.5 rounded-full border border-black/25 dark:border-white/30"
-                    style={{ backgroundColor: activeThemeMeta.accent }}
-                  />
-                </span>
-                <Palette className="w-3.5 h-3.5 text-accent hidden sm:inline" />
-                <span>🎨 Theme</span>
-                <ChevronDown className="w-3 h-3 text-muted" />
-              </button>
-
-              {showThemeMenu && (
-                <div className="absolute right-0 mt-2 w-72 sm:w-80 max-h-[72vh] flex flex-col rounded-xl border border-subtle bg-canvas shadow-2xl z-50 overflow-hidden">
-                  <div className="px-3.5 py-2.5 border-b border-subtle bg-card/80 flex items-center justify-between gap-2 shrink-0">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-muted">
-                      Color Themes ({THEME_OPTIONS.length})
-                    </span>
-                    <span className="text-[11px] font-semibold text-accent truncate">
-                      {activeThemeMeta.name}
-                    </span>
-                  </div>
-                  <div className="overflow-y-auto p-2 space-y-1">
-                    {THEME_OPTIONS.map((t) => {
-                      const selected = t.id === theme;
-                      return (
-                        <button
-                          key={t.id}
-                          onClick={() => {
-                            setTheme(t.id);
-                            setShowThemeMenu(false);
-                          }}
-                          className={`w-full text-left px-2.5 py-2 rounded-lg border text-xs transition-colors flex items-center justify-between gap-2 ${
-                            selected
-                              ? 'bg-accent/15 border-accent/50 text-primary font-semibold'
-                              : 'border-transparent text-primary hover:bg-card hover:border-subtle'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <div
-                              className="flex items-center -space-x-1 shrink-0"
-                              title={`Canvas ${t.canvas} · Accent ${t.accent}`}
-                            >
-                              <span
-                                className="w-3.5 h-3.5 rounded-full border border-zinc-400/50 shadow-xs"
-                                style={{ backgroundColor: t.canvas }}
-                              />
-                              <span
-                                className="w-3.5 h-3.5 rounded-full border border-black/25 dark:border-white/30 shadow-xs"
-                                style={{ backgroundColor: t.accent }}
-                              />
-                            </div>
-                            <div className="min-w-0 flex items-center gap-1.5">
-                              <span className="truncate">{t.name}</span>
-                              <span
-                                className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wide border shrink-0 ${
-                                  t.isDark
-                                    ? 'bg-zinc-900 text-zinc-200 border-zinc-700'
-                                    : 'bg-zinc-100 text-zinc-800 border-zinc-300'
-                                }`}
-                              >
-                                {t.isDark ? 'Dark' : 'Light'}
-                              </span>
-                            </div>
-                          </div>
-                          {selected && <Check className="w-3.5 h-3.5 text-accent shrink-0" />}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
+            {/* 🎨 34-Theme Filterable Swatch Grid Popover */}
+            <ThemeSwitcherPopover
+              isOpen={showThemeMenu}
+              onToggle={() => {
+                setShowFontMenu(false);
+                setShowThemeMenu((v) => !v);
+              }}
+              onClose={() => {
+                setShowThemeMenu(false);
+                setPreviewTheme(null);
+              }}
+              activeTheme={theme}
+              previewTheme={previewTheme}
+              onPreviewTheme={setPreviewTheme}
+              onSelectTheme={(id) => {
+                setTheme(id);
+                setPreviewTheme(null);
+              }}
+            />
 
             <button
               onClick={() => setCopilotOpen(true)}
@@ -515,6 +466,7 @@ export default function App() {
               <DashboardView
                 progress={progress}
                 onSelectTrack={handleSelectTrack}
+                onOpenQuests={() => setActiveTab('quests')}
                 onOpenAssessments={() => {
                   setCustomMockOverride(null);
                   setActiveMockNumber(null);
@@ -529,6 +481,29 @@ export default function App() {
                 onPinNote={handlePinNote}
                 onStartSm2Review={handleStartSm2Review}
                 onLaunchWeakSpotMock={handleLaunchWeakSpotMock}
+                onUpdateTargetDate={(iso) =>
+                  setProgress((prev) => updateTargetInterviewDate(prev, iso))
+                }
+                onClearBlindSpots={() =>
+                  setProgress((prev) => clearBlindSpots(prev))
+                }
+              />
+            )}
+
+            {activeTab === 'quests' && (
+              <QuestRoadmapView
+                progress={progress}
+                onOpenQuestion={openQuestionInWorkspace}
+                onLaunchMock={(num) => {
+                  setCustomMockOverride(null);
+                  setActiveMockNumber(num);
+                  setActiveTab('assessments');
+                }}
+                onOpenCarlBank={() => {
+                  setSelectedTrackId('behavioral');
+                  setBehavioralStoryBankTrigger((n) => n + 1);
+                  setActiveTab('bank');
+                }}
               />
             )}
 
@@ -545,6 +520,7 @@ export default function App() {
                 onAddGeneratedDsaQuestion={(q) =>
                   setProgress((prev) => addGeneratedDsaQuestion(prev, q))
                 }
+                behavioralStoryBankTrigger={behavioralStoryBankTrigger}
               />
             )}
 
@@ -593,6 +569,7 @@ export default function App() {
                     submissions={progress.submissionHistory?.[activeQuestion.id] || []}
                     discussions={progress.discussionNotes?.[activeQuestion.id] || []}
                     onAddDiscussion={(text) => handleAddDiscussion(activeQuestion.id, text)}
+                    initialPlainTextDocMode={launchPlainTextDocMode}
                   />
                 )}
 
@@ -660,9 +637,9 @@ export default function App() {
           whileTap={{ scale: 0.97 }}
           onClick={() => setCopilotOpen(true)}
           aria-label="Open Study AI Copilot"
-          className="fixed bottom-5 right-5 z-40 pl-1.5 pr-4 py-1.5 rounded-full bg-accent text-accent-contrast font-bold text-xs shadow-[0_8px_24px_rgba(var(--accent-rgb),0.45)] flex items-center gap-2"
+          className="fixed bottom-5 right-5 z-40 pl-1.5 pr-4 py-1.5 rounded-full bg-accent text-accent-contrast font-bold text-xs shadow-[0_8px_24px_var(--accent-glow)] flex items-center gap-2"
         >
-          <span className="rounded-full bg-[#09090B] p-0.5">
+          <span className="rounded-full bg-elevated p-0.5 border border-subtle">
             <AnimeCharacterAvatar variant="copilot" size="sm" />
           </span>
           <span>✨ Study AI Copilot</span>
@@ -698,8 +675,8 @@ export default function App() {
         onDeleteNote={handleDeleteNote}
         providerSettings={providerSettings}
         onSaveProviderSettings={(settings) => {
-          setProviderSettings(settings);
-          saveProviderSettings(settings);
+          const safe = saveProviderSettings(settings);
+          setProviderSettings(safe);
         }}
       />
     </div>

@@ -1,5 +1,6 @@
 import {
   AiProviderSettings,
+  BlindSpotRecord,
   CarlStory,
   FontPreset,
   MockAttemptRecord,
@@ -70,6 +71,57 @@ export const DEFAULT_CARL_STORIES: CarlStory[] = [
   },
 ];
 
+export function getDefaultTargetInterviewDate(): string {
+  return addDaysIso(30);
+}
+
+const BLIND_SPOT_RULES: Array<{ tag: string; keywords: string[] }> = [
+  { tag: 'Null handling', keywords: ['null', 'coalesce', 'nullif', 'missing', 'zero', 'divide', 'division'] },
+  { tag: 'Window frame bounds', keywords: ['window', 'rows between', 'range between', 'lag', 'lead', 'qualify', 'row_number', 'dense_rank', 'session', 'running'] },
+  { tag: 'Skew salting', keywords: ['skew', 'salt', 'hot key', 'broadcast', 'shuffle', 'oom', 'spill', 'repartition', 'straggler'] },
+  { tag: 'Late-arriving watermarks', keywords: ['watermark', 'late', 'out-of-order', 'dlq', 'dead-letter', 'allowed_lateness', 'pubsub', 'kafka', 'streaming'] },
+  { tag: 'SCD2 & grain boundaries', keywords: ['scd', 'bi-temporal', 'grain', 'fan-out', 'surrogate', 'dimension', 'star schema'] },
+  { tag: 'Idempotent MERGE & dedup', keywords: ['merge', 'upsert', 'dedup', 'idempoten', 'backfill', 'insert_overwrite', 'duplicate'] },
+  { tag: 'Partition pruning & clustering', keywords: ['partition', 'cluster', 'sargable', 'prun', 'materialized view', 'bi engine', 'slot'] },
+  { tag: 'Geospatial H3/S2 tiling', keywords: ['h3', 's2', 'geospatial', 'imagery', 'tile', 'raster', 'polygon', 'catchment'] },
+  { tag: 'Dual-write & shadow cutover', keywords: ['flume', 'hadoop', 'migration', 'dual-write', 'shadow', 'rollback', 'cutover'] },
+];
+
+export function extractBlindSpotTags(sources: Array<string | undefined>): string[] {
+  const combined = sources.filter(Boolean).join(' ').toLowerCase();
+  const matched: string[] = [];
+  for (const rule of BLIND_SPOT_RULES) {
+    if (rule.keywords.some((kw) => combined.includes(kw))) {
+      matched.push(rule.tag);
+    }
+  }
+  if (matched.length === 0) {
+    matched.push('Edge-case bounds');
+  }
+  return matched.slice(0, 2);
+}
+
+function incrementBlindSpots(
+  existing: Record<string, BlindSpotRecord> | undefined,
+  tags: string[],
+  sampleTitle?: string,
+  trackId?: TrackId
+): Record<string, BlindSpotRecord> {
+  const next = { ...(existing || {}) };
+  const nowIso = new Date().toISOString();
+  for (const tag of tags) {
+    const cur = next[tag];
+    next[tag] = {
+      tag,
+      count: (cur?.count || 0) + 1,
+      lastSeenAt: nowIso,
+      sampleTitle: sampleTitle || cur?.sampleTitle,
+      trackId: trackId || cur?.trackId,
+    };
+  }
+  return next;
+}
+
 function getDefaultProgress(): UserProgressState {
   return {
     solvedQuestionIds: [],
@@ -82,6 +134,8 @@ function getDefaultProgress(): UserProgressState {
     streakDays: 0,
     longestStreakDays: 0,
     dailyTarget: 5,
+    targetInterviewDate: getDefaultTargetInterviewDate(),
+    blindSpotCounts: {},
     mockHistory: [],
     savedNotes: [],
     codeDrafts: {},
@@ -101,6 +155,8 @@ export function loadProgress(): UserProgressState {
     return {
       ...getDefaultProgress(),
       ...parsed,
+      targetInterviewDate: parsed.targetInterviewDate || getDefaultTargetInterviewDate(),
+      blindSpotCounts: parsed.blindSpotCounts || {},
       carlStories:
         parsed.carlStories && parsed.carlStories.length > 0
           ? parsed.carlStories
@@ -147,6 +203,10 @@ export function recordQuestionSubmission(
   meta?: {
     title?: string;
     trackId?: TrackId;
+    concept?: string;
+    tags?: string[];
+    dsaPattern?: string;
+    failedHints?: string[];
     runtimeMs?: number;
     language?: string;
     codeSnapshot?: string;
@@ -174,6 +234,24 @@ export function recordQuestionSubmission(
   };
   const streak = computeStreak(activityDates);
   const longest = Math.max(prev.longestStreakDays || 0, streak);
+
+  // Auto-track recurring blind spots on failed test assertions
+  let nextBlindSpots = prev.blindSpotCounts || {};
+  if (!passed) {
+    const detected = extractBlindSpotTags([
+      ...(meta?.failedHints || []),
+      meta?.concept,
+      meta?.dsaPattern,
+      ...(meta?.tags || []),
+      meta?.title,
+    ]);
+    nextBlindSpots = incrementBlindSpots(
+      nextBlindSpots,
+      detected,
+      meta?.title,
+      meta?.trackId
+    );
+  }
 
   // SM-2 Spaced Repetition Update
   const nextSm2 = { ...(prev.sm2Queue || {}) };
@@ -233,6 +311,7 @@ export function recordQuestionSubmission(
     activityDates,
     streakDays: streak,
     longestStreakDays: longest,
+    blindSpotCounts: nextBlindSpots,
     sm2Queue: nextSm2,
     submissionHistory: {
       ...(prev.submissionHistory || {}),
@@ -287,13 +366,51 @@ export function recordMockAttempt(
     }
   }
 
+  // Auto-track recurring blind spots on Lean Hire / No Hire verdicts
+  let nextBlindSpots = prev.blindSpotCounts || {};
+  if (attempt.verdict === 'Lean Hire' || attempt.verdict === 'No Hire') {
+    const detected = extractBlindSpotTags([
+      ...(attempt.growthAreas || []),
+      attempt.summary,
+      attempt.title,
+      attempt.roundType,
+    ]);
+    nextBlindSpots = incrementBlindSpots(
+      nextBlindSpots,
+      detected,
+      `Mock #${String(attempt.mockNumber).padStart(2, '0')} · ${attempt.title}`
+    );
+  }
+
   const next: UserProgressState = {
     ...prev,
     mockHistory: [attempt, ...prev.mockHistory],
     activityDates,
     streakDays: streak,
     longestStreakDays: longest,
+    blindSpotCounts: nextBlindSpots,
     sm2Queue: nextSm2,
+  };
+  saveProgress(next);
+  return next;
+}
+
+export function updateTargetInterviewDate(
+  prev: UserProgressState,
+  targetInterviewDate: string
+): UserProgressState {
+  const next: UserProgressState = {
+    ...prev,
+    targetInterviewDate,
+  };
+  saveProgress(next);
+  return next;
+}
+
+export function clearBlindSpots(prev: UserProgressState): UserProgressState {
+  const next: UserProgressState = {
+    ...prev,
+    blindSpotCounts: {},
   };
   saveProgress(next);
   return next;
@@ -389,6 +506,7 @@ export interface ThemeOptionMeta {
   border: string;
   text: string;
   accent: string;
+  secondary: string;
 }
 
 export const THEME_OPTIONS: ThemeOptionMeta[] = [
@@ -402,6 +520,7 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
     border: '#27272A',
     text: '#FAFAFA',
     accent: '#9D7FEA',
+    secondary: '#F472B6',
   },
   {
     id: 'alabaster-lavender',
@@ -413,6 +532,7 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
     border: '#E4E4E7',
     text: '#09090B',
     accent: '#9D7FEA',
+    secondary: '#6D28D9',
   },
   {
     id: 'crimson-noir',
@@ -424,6 +544,7 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
     border: '#2E1A21',
     text: '#FAFAFA',
     accent: '#EF4444',
+    secondary: '#FB7185',
   },
   {
     id: 'scarlet-ivory',
@@ -435,6 +556,7 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
     border: '#E8DCDC',
     text: '#111115',
     accent: '#DC2626',
+    secondary: '#F97316',
   },
   {
     id: 'cyber-emerald',
@@ -446,6 +568,7 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
     border: '#1E332B',
     text: '#F4FBF8',
     accent: '#10B981',
+    secondary: '#38BDF8',
   },
   {
     id: 'tokyo-midnight',
@@ -457,6 +580,7 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
     border: '#232B42',
     text: '#F8FAFC',
     accent: '#38BDF8',
+    secondary: '#818CF8',
   },
   {
     id: 'amber-terminal',
@@ -468,6 +592,7 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
     border: '#2D231A',
     text: '#FAFAF9',
     accent: '#F59E0B',
+    secondary: '#FB7185',
   },
   {
     id: 'sakura-velvet',
@@ -479,6 +604,7 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
     border: '#30202B',
     text: '#FDF2F8',
     accent: '#F472B6',
+    secondary: '#C084FC',
   },
   {
     id: 'nordic-frost',
@@ -490,6 +616,7 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
     border: '#CBD5E1',
     text: '#0F172A',
     accent: '#0284C7',
+    secondary: '#0D9488',
   },
   {
     id: 'matcha-cream',
@@ -501,6 +628,7 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
     border: '#D7E0CC',
     text: '#142317',
     accent: '#16A34A',
+    secondary: '#0D9488',
   },
   {
     id: 'cyberpunk-synth',
@@ -512,6 +640,7 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
     border: '#2C1A4D',
     text: '#FAF5FF',
     accent: '#E879F9',
+    secondary: '#22D3EE',
   },
   {
     id: 'espresso-parchment',
@@ -523,6 +652,271 @@ export const THEME_OPTIONS: ThemeOptionMeta[] = [
     border: '#E2D6C5',
     text: '#1C1917',
     accent: '#B45309',
+    secondary: '#0F766E',
+  },
+  {
+    id: 'velvet-maroon',
+    name: 'Velvet Maroon',
+    tag: 'Maroon-Rose',
+    isDark: true,
+    canvas: '#0A0507',
+    card: '#140A0E',
+    border: '#331621',
+    text: '#FDF2F5',
+    accent: '#BE123C',
+    secondary: '#F472B6',
+  },
+  {
+    id: 'bordeaux-cream',
+    name: 'Bordeaux Cream',
+    tag: 'Burgundy Maroon',
+    isDark: false,
+    canvas: '#FDF9FA',
+    card: '#F7EEF0',
+    border: '#E3CCD2',
+    text: '#1F0B11',
+    accent: '#881337',
+    secondary: '#BE123C',
+  },
+  {
+    id: 'royal-gold-onyx',
+    name: 'Royal Gold & Onyx',
+    tag: 'Burnished Gold',
+    isDark: true,
+    canvas: '#08080A',
+    card: '#121116',
+    border: '#2B2633',
+    text: '#FAF8F5',
+    accent: '#D97706',
+    secondary: '#FBBF24',
+  },
+  {
+    id: 'cobalt-slate',
+    name: 'Cobalt Slate',
+    tag: 'Electric Cobalt',
+    isDark: true,
+    canvas: '#060A12',
+    card: '#0E1626',
+    border: '#1E2E4D',
+    text: '#F8FAFC',
+    accent: '#3B82F6',
+    secondary: '#22D3EE',
+  },
+  {
+    id: 'teal-graphite',
+    name: 'Teal Graphite',
+    tag: 'Deep Cyan-Teal',
+    isDark: true,
+    canvas: '#060D0E',
+    card: '#0D191B',
+    border: '#1B3438',
+    text: '#F0FDFA',
+    accent: '#14B8A6',
+    secondary: '#38BDF8',
+  },
+  {
+    id: 'rosewood-linen',
+    name: 'Rosewood Linen',
+    tag: 'Warm Rosewood',
+    isDark: false,
+    canvas: '#FAF6F5',
+    card: '#F2EAE8',
+    border: '#DDD0CD',
+    text: '#1C1413',
+    accent: '#9F1239',
+    secondary: '#D97706',
+  },
+  {
+    id: 'nord-polar',
+    name: 'Nord Polar Night',
+    tag: 'Arctic Frost',
+    isDark: true,
+    canvas: '#141821',
+    card: '#1D2330',
+    border: '#2E374A',
+    text: '#ECEFF4',
+    accent: '#88C0D0',
+    secondary: '#81A1C1',
+  },
+  {
+    id: 'gruvbox-carbon',
+    name: 'Gruvbox Carbon',
+    tag: 'Warm Retro',
+    isDark: true,
+    canvas: '#141210',
+    card: '#1E1B18',
+    border: '#38322B',
+    text: '#FBF1C7',
+    accent: '#FE8019',
+    secondary: '#FABD2F',
+  },
+  {
+    id: 'monokai-obsidian',
+    name: 'Monokai Obsidian',
+    tag: 'Acid Lime',
+    isDark: true,
+    canvas: '#121114',
+    card: '#1C1B20',
+    border: '#33303B',
+    text: '#F8F8F2',
+    accent: '#A6E22E',
+    secondary: '#66D9EF',
+  },
+  {
+    id: 'one-dark-slate',
+    name: 'One Dark Slate',
+    tag: 'Studio Blue',
+    isDark: true,
+    canvas: '#13161C',
+    card: '#1C212B',
+    border: '#2D3545',
+    text: '#EEF1F6',
+    accent: '#61AFEF',
+    secondary: '#C678DD',
+  },
+  {
+    id: 'midnight-indigo',
+    name: 'Midnight Indigo',
+    tag: 'Deep Sapphire',
+    isDark: true,
+    canvas: '#070914',
+    card: '#0E1329',
+    border: '#1E2852',
+    text: '#EEF2FF',
+    accent: '#6366F1',
+    secondary: '#38BDF8',
+  },
+  {
+    id: 'rose-pine-moon',
+    name: 'Rosé Pine Moon',
+    tag: 'Twilight Rose',
+    isDark: true,
+    canvas: '#161422',
+    card: '#211E33',
+    border: '#393552',
+    text: '#E0DEF4',
+    accent: '#EB6F92',
+    secondary: '#9CCFD8',
+  },
+  {
+    id: 'deep-crimson',
+    name: 'Crimson Noir (Deep)',
+    tag: 'Deep Crimson',
+    isDark: true,
+    canvas: '#070506',
+    card: '#120A0D',
+    border: '#2B141B',
+    text: '#FFF1F3',
+    accent: '#E11D48',
+    secondary: '#FB7185',
+  },
+  {
+    id: 'emerald-forest',
+    name: 'Emerald Forest',
+    tag: 'Rich Emerald',
+    isDark: true,
+    canvas: '#040B08',
+    card: '#0A1711',
+    border: '#163326',
+    text: '#ECFDF5',
+    accent: '#10B981',
+    secondary: '#34D399',
+  },
+  {
+    id: 'amethyst-velvet',
+    name: 'Amethyst Velvet',
+    tag: 'Royal Amethyst',
+    isDark: true,
+    canvas: '#0A0610',
+    card: '#140D21',
+    border: '#2B1D47',
+    text: '#F5F3FF',
+    accent: '#A855F7',
+    secondary: '#E879F9',
+  },
+  {
+    id: 'solarized-midnight',
+    name: 'Solarized Midnight',
+    tag: 'Solarized Cyan',
+    isDark: true,
+    canvas: '#002B36',
+    card: '#073642',
+    border: '#134E5E',
+    text: '#FDF6E3',
+    accent: '#2AA198',
+    secondary: '#268BD2',
+  },
+  {
+    id: 'dracula-nocturne',
+    name: 'Dracula Nocturne',
+    tag: 'Pink-Violet',
+    isDark: true,
+    canvas: '#191A21',
+    card: '#282A36',
+    border: '#44475A',
+    text: '#F8F8F2',
+    accent: '#FF79C6',
+    secondary: '#BD93F9',
+  },
+  {
+    id: 'catppuccin-mocha',
+    name: 'Catppuccin Mocha',
+    tag: 'Pastel Mauve',
+    isDark: true,
+    canvas: '#11111B',
+    card: '#1E1E2E',
+    border: '#313244',
+    text: '#CDD6F4',
+    accent: '#CBA6F7',
+    secondary: '#89B4FA',
+  },
+  {
+    id: 'matcha-latte',
+    name: 'Matcha Latte',
+    tag: 'Organic Matcha',
+    isDark: false,
+    canvas: '#F6F9F4',
+    card: '#EBF2E6',
+    border: '#D2E0C8',
+    text: '#162413',
+    accent: '#4D7C0F',
+    secondary: '#15803D',
+  },
+  {
+    id: 'sandstone-editorial',
+    name: 'Sandstone Editorial',
+    tag: 'Warm Amber Ink',
+    isDark: false,
+    canvas: '#FAF7F2',
+    card: '#F2ECE1',
+    border: '#DFD5C5',
+    text: '#241E16',
+    accent: '#B45309',
+    secondary: '#0F766E',
+  },
+  {
+    id: 'lavender-cloud',
+    name: 'Lavender Cloud',
+    tag: 'Soft Violet',
+    isDark: false,
+    canvas: '#F9F7FD',
+    card: '#F0EBF9',
+    border: '#DDD3F0',
+    text: '#1E1533',
+    accent: '#7C3AED',
+    secondary: '#DB2777',
+  },
+  {
+    id: 'arctic-alabaster',
+    name: 'Arctic Alabaster',
+    tag: 'Ocean Blue',
+    isDark: false,
+    canvas: '#F8FAFC',
+    card: '#FFFFFF',
+    border: '#E2E8F0',
+    text: '#0F172A',
+    accent: '#0284C7',
+    secondary: '#2563EB',
   },
 ];
 
@@ -724,20 +1118,130 @@ export function saveFontPreset(preset: FontPreset): void {
   }
 }
 
-export function loadProviderSettings(): AiProviderSettings {
+export const OPENAI_API_KEY_STORAGE = 'openai_api_key';
+
+export function loadOpenAiApiKey(): string {
   try {
-    const raw = localStorage.getItem(PROVIDER_KEY);
-    if (!raw) return { provider: 'gemini', customApiKey: '', customModel: '' };
-    return JSON.parse(raw) as AiProviderSettings;
+    return (localStorage.getItem(OPENAI_API_KEY_STORAGE) || '').trim();
   } catch {
-    return { provider: 'gemini', customApiKey: '', customModel: '' };
+    return '';
   }
 }
 
-export function saveProviderSettings(settings: AiProviderSettings): void {
+export function saveOpenAiApiKey(key: string): void {
   try {
-    localStorage.setItem(PROVIDER_KEY, JSON.stringify(settings));
+    const clean = key.trim();
+    if (clean) {
+      localStorage.setItem(OPENAI_API_KEY_STORAGE, clean);
+    } else {
+      localStorage.removeItem(OPENAI_API_KEY_STORAGE);
+    }
   } catch {
     // ignore
   }
+}
+
+export function isValidOpenAiKey(key: string): boolean {
+  const clean = key.trim();
+  return clean.startsWith('sk-') && clean.length >= 12;
+}
+
+export function sanitizeProviderSettings(settings: Partial<AiProviderSettings> | null | undefined): AiProviderSettings {
+  const storedOpenAiKey = loadOpenAiApiKey();
+  const rawCustomKey = typeof settings?.customApiKey === 'string' ? settings.customApiKey.trim() : '';
+  const customModel = typeof settings?.customModel === 'string' ? settings.customModel.trim() : '';
+  const requested = settings?.provider;
+
+  if (requested === 'openai') {
+    const effectiveOpenAiKey = rawCustomKey || storedOpenAiKey;
+    if (isValidOpenAiKey(effectiveOpenAiKey)) {
+      return {
+        provider: 'openai',
+        customApiKey: effectiveOpenAiKey,
+        customModel: customModel || 'gpt-4o',
+      };
+    }
+    return {
+      provider: 'gemini',
+      customApiKey: '',
+      customModel: 'gemini-2.5-flash',
+    };
+  }
+
+  const isLegacyExternal = requested === 'anthropic' || requested === 'openrouter';
+  if (isLegacyExternal && rawCustomKey.length >= 8) {
+    return { provider: requested, customApiKey: rawCustomKey, customModel };
+  }
+
+  return {
+    provider: 'gemini',
+    customApiKey: rawCustomKey,
+    customModel: customModel === 'gemini-2.5-pro' ? 'gemini-2.5-pro' : 'gemini-2.5-flash',
+  };
+}
+
+export function loadProviderSettings(): AiProviderSettings {
+  try {
+    const raw = localStorage.getItem(PROVIDER_KEY);
+    if (!raw) {
+      return { provider: 'gemini', customApiKey: '', customModel: 'gemini-2.5-flash' };
+    }
+    const parsed = JSON.parse(raw) as Partial<AiProviderSettings>;
+    if (parsed.provider === 'openai' && !parsed.customApiKey) {
+      parsed.customApiKey = loadOpenAiApiKey();
+    }
+    return sanitizeProviderSettings(parsed);
+  } catch {
+    return { provider: 'gemini', customApiKey: '', customModel: 'gemini-2.5-flash' };
+  }
+}
+
+export function saveProviderSettings(settings: AiProviderSettings): AiProviderSettings {
+  if (settings.provider === 'openai') {
+    saveOpenAiApiKey(settings.customApiKey);
+  }
+  const safe = sanitizeProviderSettings(settings);
+  try {
+    localStorage.setItem(PROVIDER_KEY, JSON.stringify(safe));
+  } catch {
+    // ignore
+  }
+  return safe;
+}
+
+export function sanitizeAiErrorMessage(raw: unknown, fallback = 'AI service is temporarily unavailable. Please retry.'): string {
+  const msg = raw instanceof Error ? raw.message : typeof raw === 'string' ? raw : '';
+  if (!msg.trim()) return fallback;
+
+  const lower = msg.toLowerCase();
+  if (lower.includes('openai')) {
+    return msg.trim();
+  }
+  if (lower.includes('503') || lower.includes('unavailable') || lower.includes('overloaded') || lower.includes('high demand')) {
+    return 'Google Gemini is temporarily experiencing high demand (503). Click Retry to run again.';
+  }
+  if (lower.includes('429') || lower.includes('resource_exhausted') || lower.includes('rate limit') || lower.includes('quota')) {
+    return 'Google Gemini rate limit reached (429). Wait a moment and click Retry.';
+  }
+  if (lower.includes('failed to fetch') || lower.includes('networkerror') || lower.includes('network error')) {
+    return 'Unable to reach the AI server. Check your connection and click Retry.';
+  }
+
+  const jsonStart = msg.indexOf('{');
+  if (jsonStart !== -1) {
+    try {
+      const parsed = JSON.parse(msg.slice(jsonStart)) as {
+        error?: { message?: string };
+        message?: string;
+      };
+      const inner = parsed.error?.message || parsed.message;
+      if (inner && inner.trim()) return inner.trim();
+    } catch {
+      // strip raw JSON snippet if partial
+    }
+    const stripped = msg.slice(0, jsonStart).trim();
+    return stripped || fallback;
+  }
+
+  return msg.trim();
 }

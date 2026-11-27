@@ -8,6 +8,8 @@ interface AnimeCharacterAvatarProps {
   variant?: CharacterVariant;
   profile?: InterviewerProfile;
   isSpeaking?: boolean;
+  isLiveListening?: boolean;
+  audioLevel?: number;
   nodTrigger?: number;
   size?: 'sm' | 'md' | 'studio';
   className?: string;
@@ -17,6 +19,8 @@ export const AnimeCharacterAvatar: React.FC<AnimeCharacterAvatarProps> = ({
   variant = 'copilot',
   profile,
   isSpeaking = false,
+  isLiveListening = false,
+  audioLevel = 0,
   nodTrigger = 0,
   size = 'studio',
   className = '',
@@ -119,19 +123,28 @@ export const AnimeCharacterAvatar: React.FC<AnimeCharacterAvatarProps> = ({
 
   return (
     <div className={`relative overflow-hidden select-none ${dims} ${className}`}>
-      {isSpeaking && size !== 'sm' && (
+      {(isSpeaking || isLiveListening) && size !== 'sm' && (
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center z-10">
-          <motion.div
-            initial={{ scale: 0.85, opacity: 0.6 }}
-            animate={{ scale: 1.15, opacity: 0 }}
-            transition={{ duration: 1.2, repeat: Infinity, ease: 'easeOut' }}
-            className="w-40 h-40 rounded-full border-2 border-accent/60"
+          <div
+            className={`rounded-full border-2 transition-transform duration-100 ${
+              isSpeaking ? 'border-accent/70' : 'border-[#10B981]/60'
+            }`}
+            style={{
+              width: `${132 + Math.round(audioLevel * 38)}px`,
+              height: `${132 + Math.round(audioLevel * 38)}px`,
+              opacity: 0.25 + audioLevel * 0.65,
+              boxShadow: isSpeaking
+                ? `0 0 ${12 + Math.round(audioLevel * 22)}px rgba(var(--accent-rgb), 0.55)`
+                : `0 0 ${10 + Math.round(audioLevel * 18)}px rgba(16, 185, 129, 0.45)`,
+            }}
           />
           <motion.div
-            initial={{ scale: 0.75, opacity: 0.5 }}
-            animate={{ scale: 1.05, opacity: 0 }}
-            transition={{ duration: 1.2, delay: 0.4, repeat: Infinity, ease: 'easeOut' }}
-            className="absolute w-36 h-36 rounded-full border border-accent/50"
+            initial={{ scale: 0.82, opacity: 0.55 }}
+            animate={{ scale: 1.18, opacity: 0 }}
+            transition={{ duration: 1.25, repeat: Infinity, ease: 'easeOut' }}
+            className={`absolute w-36 h-36 rounded-full border ${
+              isSpeaking ? 'border-accent/55' : 'border-[#10B981]/45'
+            }`}
           />
         </div>
       )}

@@ -162,7 +162,7 @@ export const PatternMasterclassDrawer: React.FC<PatternMasterclassDrawerProps> =
                     {copiedTemplate ? 'Copied' : 'Copy Template'}
                   </button>
                 </div>
-                <pre className="p-3.5 rounded-lg bg-[#09090B] text-emerald-300 border border-[#27272A] font-mono text-xs overflow-x-auto leading-relaxed">
+                <pre className="p-3.5 rounded-lg bg-editor text-primary border border-subtle font-mono text-xs overflow-x-auto leading-relaxed">
                   {guide.codeTemplate}
                 </pre>
               </div>

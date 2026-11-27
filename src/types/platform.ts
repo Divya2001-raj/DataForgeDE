@@ -12,7 +12,29 @@ export type ThemeId =
   | 'nordic-frost'
   | 'matcha-cream'
   | 'cyberpunk-synth'
-  | 'espresso-parchment';
+  | 'espresso-parchment'
+  | 'velvet-maroon'
+  | 'bordeaux-cream'
+  | 'royal-gold-onyx'
+  | 'cobalt-slate'
+  | 'teal-graphite'
+  | 'rosewood-linen'
+  | 'nord-polar'
+  | 'gruvbox-carbon'
+  | 'monokai-obsidian'
+  | 'one-dark-slate'
+  | 'midnight-indigo'
+  | 'rose-pine-moon'
+  | 'deep-crimson'
+  | 'emerald-forest'
+  | 'amethyst-velvet'
+  | 'solarized-midnight'
+  | 'dracula-nocturne'
+  | 'catppuccin-mocha'
+  | 'matcha-latte'
+  | 'sandstone-editorial'
+  | 'lavender-cloud'
+  | 'arctic-alabaster';
 
 export type FontPreset =
   | 'modern'
@@ -325,6 +347,7 @@ export interface MockAttemptRecord {
   completedAt: string;
   durationSeconds: number;
   summary: string;
+  growthAreas?: string[];
   rubricScores?: {
     gca: number;
     rrk: number;
@@ -394,6 +417,14 @@ export interface CarlStory {
   updatedAt: string;
 }
 
+export interface BlindSpotRecord {
+  tag: string;
+  count: number;
+  lastSeenAt: string;
+  sampleTitle?: string;
+  trackId?: TrackId;
+}
+
 export interface UserProgressState {
   solvedQuestionIds: string[];
   attemptedQuestionIds: string[];
@@ -405,6 +436,8 @@ export interface UserProgressState {
   streakDays: number;
   longestStreakDays: number;
   dailyTarget: number;
+  targetInterviewDate?: string; // YYYY-MM-DD
+  blindSpotCounts?: Record<string, BlindSpotRecord>;
   mockHistory: MockAttemptRecord[];
   savedNotes: StudyNote[];
   codeDrafts: Record<string, string>;

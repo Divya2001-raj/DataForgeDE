@@ -1,8 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Question } from '../../types/platform';
+import { sanitizeAiErrorMessage } from '../../utils/storage';
+import { sendCopilotChat, transcribeAudioBlob } from '../../services/geminiAiService';
+import { AudioRecordingHandle, startMicRecording } from '../../utils/liveAudio';
 import { CelebrationBurst } from '../visuals/CelebrationAndBadges';
 import { FollowUpsSection } from './FollowUpsSection';
-import { CheckCircle2, Eye, Trash2 } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Eye, Mic, RefreshCw, Square, Trash2 } from 'lucide-react';
 
 interface ConceptualWorkspaceProps {
   question: Question;
@@ -26,37 +29,83 @@ export const ConceptualWorkspace: React.FC<ConceptualWorkspaceProps> = ({
   const spec = question.conceptualSpec!;
   const [showOutline, setShowOutline] = useState(false);
   const [aiFeedback, setAiFeedback] = useState<string | null>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
   const [grading, setGrading] = useState(false);
   const [showCelebration, setShowCelebration] = useState(false);
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const [isTranscribingVoice, setIsTranscribingVoice] = useState(false);
+  const audioRecRef = useRef<AudioRecordingHandle | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (audioRecRef.current) {
+        audioRecRef.current.cancel();
+        audioRecRef.current = null;
+      }
+    };
+  }, [question.id]);
+
+  const handleToggleVoiceAnswer = async () => {
+    if (isTranscribingVoice) return;
+
+    if (isRecordingVoice && audioRecRef.current) {
+      const handle = audioRecRef.current;
+      audioRecRef.current = null;
+      setIsRecordingVoice(false);
+      setIsTranscribingVoice(true);
+      setAiError(null);
+      try {
+        const blob = await handle.stop();
+        const res = await transcribeAudioBlob(blob, `${question.title} (${question.concept})`);
+        const text = res.transcript.trim();
+        if (text) {
+          onChangeAnswer(answerDraft.trim() ? `${answerDraft.trim()}\n\n${text}` : text);
+        } else {
+          setAiError('No speech detected in the recording. Please speak clearly and retry.');
+        }
+      } catch (err: unknown) {
+        setAiError(sanitizeAiErrorMessage(err, 'Audio transcription failed. Please try again.'));
+      } finally {
+        setIsTranscribingVoice(false);
+      }
+      return;
+    }
+
+    try {
+      setAiError(null);
+      const handle = await startMicRecording();
+      audioRecRef.current = handle;
+      setIsRecordingVoice(true);
+    } catch (err: unknown) {
+      setAiError(
+        sanitizeAiErrorMessage(err, 'Microphone permission is required for Voice Answer Mode.')
+      );
+    }
+  };
 
   const handleGradeResponse = async () => {
     setGrading(true);
     setAiFeedback(null);
+    setAiError(null);
     try {
-      const res = await fetch('/api/ai/copilot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mode: 'grade',
-          context: {
-            view: 'Conceptual / Behavioral Workspace',
-            questionTitle: question.title,
-            questionPrompt: question.prompt,
-            concept: question.concept,
-            codeBuffer: answerDraft,
+      const data = await sendCopilotChat({
+        mode: 'grade',
+        context: {
+          view: 'Conceptual / Behavioral Workspace',
+          questionTitle: question.title,
+          questionPrompt: question.prompt,
+          concept: question.concept,
+          codeBuffer: answerDraft,
+        },
+        messages: [
+          {
+            role: 'user',
+            content: `Evaluate my written answer against this Tier-1 rubric (${spec.rubricChecklist.join(
+              '; '
+            )}). Give a brief Verdict (Pass / Needs Depth), score out of 100, and 2 specific improvements.`,
           },
-          messages: [
-            {
-              role: 'user',
-              content: `Evaluate my written answer against this Tier-1 rubric (${spec.rubricChecklist.join(
-                '; '
-              )}). Give a brief Verdict (Pass / Needs Depth), score out of 100, and 2 specific improvements.`,
-            },
-          ],
-        }),
+        ],
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Grading failed');
       setAiFeedback(data.reply);
       const passed = answerDraft.trim().length >= 80;
       onRecordSubmission(passed);
@@ -65,7 +114,7 @@ export const ConceptualWorkspace: React.FC<ConceptualWorkspaceProps> = ({
         setTimeout(() => setShowCelebration(false), 2100);
       }
     } catch (err: unknown) {
-      setAiFeedback(err instanceof Error ? err.message : 'Unable to evaluate response.');
+      setAiError(sanitizeAiErrorMessage(err, 'Unable to evaluate response right now.'));
     } finally {
       setGrading(false);
     }
@@ -169,11 +218,35 @@ export const ConceptualWorkspace: React.FC<ConceptualWorkspaceProps> = ({
 
       {/* Right Pane: Structured Response Pad + AI Grading */}
       <div className="lg:col-span-7 rounded-xl border border-subtle bg-card flex flex-col">
-        <div className="px-4 py-2.5 border-b border-subtle flex items-center justify-between gap-2">
+        <div className="px-4 py-2.5 border-b border-subtle flex flex-wrap items-center justify-between gap-2">
           <span className="text-xs font-semibold text-primary">
             Structured Technical / STAR+L Response Pad
           </span>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={isTranscribingVoice || grading}
+              onClick={handleToggleVoiceAnswer}
+              className={`btn-tactile px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5 ${
+                isRecordingVoice
+                  ? 'bg-[#EF4444] text-white border-[#EF4444]'
+                  : 'border-accent/45 bg-accent/10 text-accent hover:bg-accent/20'
+              }`}
+            >
+              {isRecordingVoice ? (
+                <>
+                  <Square className="w-3.5 h-3.5 fill-current" />
+                  Stop &amp; Transcribe
+                </>
+              ) : isTranscribingVoice ? (
+                'Transcribing...'
+              ) : (
+                <>
+                  <Mic className="w-3.5 h-3.5" />
+                  🎙️ Voice Answer
+                </>
+              )}
+            </button>
             <button
               onClick={() => onChangeAnswer('')}
               className="btn-tactile px-2.5 py-1.5 rounded-lg border border-[#EF4444]/40 text-[#EF4444] text-xs font-semibold hover:bg-[#EF4444]/10 flex items-center gap-1"
@@ -203,6 +276,26 @@ export const ConceptualWorkspace: React.FC<ConceptualWorkspaceProps> = ({
             className="w-full h-72 rounded-lg border border-subtle bg-canvas text-primary p-3.5 text-sm leading-relaxed focus:outline-none focus:border-accent"
           />
         </div>
+
+        {aiError && (
+          <div className="border-t border-subtle p-4 text-xs">
+            <div className="rounded-lg border border-[#EF4444]/40 bg-[#EF4444]/10 px-3 py-2 flex items-center justify-between gap-2 text-red-700 dark:text-[#EF4444]">
+              <div className="flex items-center gap-2 min-w-0">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{aiError}</span>
+              </div>
+              <button
+                type="button"
+                disabled={grading}
+                onClick={handleGradeResponse}
+                className="btn-tactile px-2.5 py-1 rounded-md bg-accent text-accent-contrast text-[11px] font-bold hover:bg-accent-hover flex items-center gap-1 shrink-0"
+              >
+                <RefreshCw className="w-3 h-3" />
+                Retry
+              </button>
+            </div>
+          </div>
+        )}
 
         {aiFeedback && (
           <div className="border-t border-subtle p-4 text-xs whitespace-pre-wrap text-primary/90 max-h-60 overflow-y-auto">

@@ -1,8 +1,10 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Question, SchemaRelation, SchemaTable } from '../../types/platform';
+import { sanitizeAiErrorMessage } from '../../utils/storage';
+import { reviewSchema } from '../../services/geminiAiService';
 import { CelebrationBurst } from '../visuals/CelebrationAndBadges';
 import { FollowUpsSection } from './FollowUpsSection';
-import { Code2, Copy, Link2, Plus, Rocket, Trash2 } from 'lucide-react';
+import { Code2, Copy, Link2, Plus, RefreshCw, Rocket, Trash2 } from 'lucide-react';
 
 interface ModelingWorkspaceProps {
   question: Question;
@@ -179,20 +181,14 @@ export const ModelingWorkspace: React.FC<ModelingWorkspaceProps> = ({
     setReviewing(true);
     setReviewError(null);
     try {
-      const res = await fetch('/api/ai/review-schema', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          questionTitle: question.title,
-          businessContext: spec.businessContext,
-          requirements: spec.requirements,
-          tables,
-          relationships: relations,
-          ddl: generatedDdl,
-        }),
+      const data = await reviewSchema({
+        questionTitle: question.title,
+        businessContext: spec.businessContext,
+        requirements: spec.requirements,
+        tables,
+        relationships: relations,
+        ddl: generatedDdl,
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Schema grading failed');
       setReviewResult(data);
       const passed = Number(data.score) >= 65;
       onRecordSubmission(passed);
@@ -201,7 +197,7 @@ export const ModelingWorkspace: React.FC<ModelingWorkspaceProps> = ({
         setTimeout(() => setShowCelebration(false), 2100);
       }
     } catch (err: unknown) {
-      setReviewError(err instanceof Error ? err.message : 'Unable to grade schema.');
+      setReviewError(sanitizeAiErrorMessage(err, 'Unable to grade schema.'));
     } finally {
       setReviewing(false);
     }
@@ -516,7 +512,18 @@ export const ModelingWorkspace: React.FC<ModelingWorkspaceProps> = ({
         {(reviewResult || reviewError) && (
           <div className="border-t border-subtle p-4 max-h-[220px] overflow-y-auto text-xs space-y-2">
             {reviewError && (
-              <div className="animate-shake p-3 rounded-lg bg-[#EF4444]/15 text-[#EF4444]">❌ {reviewError}</div>
+              <div className="animate-shake p-3 rounded-lg bg-[#EF4444]/15 text-[#EF4444] flex items-center justify-between gap-2">
+                <span>❌ {reviewError}</span>
+                <button
+                  type="button"
+                  disabled={reviewing}
+                  onClick={handleReview}
+                  className="btn-tactile px-2.5 py-1 rounded-md bg-accent text-accent-contrast text-[11px] font-bold hover:bg-accent-hover flex items-center gap-1 shrink-0"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Retry
+                </button>
+              </div>
             )}
             {reviewResult && (
               <>
@@ -581,7 +588,7 @@ export const ModelingWorkspace: React.FC<ModelingWorkspaceProps> = ({
                 </button>
               </div>
             </div>
-            <pre className="p-4 bg-[#09090B] text-emerald-300 font-mono text-xs max-h-[420px] overflow-auto">
+            <pre className="p-4 bg-editor text-primary font-mono text-xs max-h-[420px] overflow-auto">
               {generatedDdl}
             </pre>
           </div>

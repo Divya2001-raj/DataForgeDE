@@ -138,7 +138,7 @@ export const ConceptDrawer: React.FC<ConceptDrawerProps> = ({
                   <Code2 className="w-3.5 h-3.5 text-accent" />
                   Canonical Pattern
                 </h3>
-                <pre className="p-3.5 rounded-lg bg-[#09090B] text-emerald-300 border border-[#27272A] font-mono text-xs overflow-x-auto leading-relaxed">
+                <pre className="p-3.5 rounded-lg bg-editor text-primary border border-subtle font-mono text-xs overflow-x-auto leading-relaxed">
                   {guide.codeExample}
                 </pre>
               </div>

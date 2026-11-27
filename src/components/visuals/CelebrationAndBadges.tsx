@@ -58,13 +58,13 @@ export const CelebrationBurst: React.FC<CelebrationBurstProps> = ({
               animate={{ scale: 1, y: 0, opacity: 1 }}
               exit={{ scale: 0.85, y: -10, opacity: 0 }}
               transition={{ type: 'spring', stiffness: 360, damping: 22 }}
-              className="px-5 py-3 rounded-2xl border border-[#10B981]/60 bg-[#09090B]/95 text-white shadow-[0_0_32px_rgba(var(--accent-rgb),0.4)] flex items-center gap-3"
+              className="px-5 py-3 rounded-2xl border border-[#10B981]/60 bg-elevated text-primary shadow-[0_0_32px_var(--accent-glow)] flex items-center gap-3"
             >
               <div className="w-8 h-8 rounded-full bg-[#10B981]/20 border border-[#10B981] flex items-center justify-center">
                 <CheckCircle2 className="w-5 h-5 text-[#10B981]" />
               </div>
               <div>
-                <div className="text-sm font-bold text-[#FAFAFA]">{label}</div>
+                <div className="text-sm font-bold text-primary">{label}</div>
                 <div className="text-[11px] text-accent">{sublabel}</div>
               </div>
             </motion.div>

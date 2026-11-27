@@ -1,9 +1,16 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { motion } from 'motion/react';
 import { TRACKS } from '../data/tracks';
 import { ALL_QUESTIONS, QUESTIONS_BY_TRACK } from '../data/questions';
 import { GOOGLE_ROUND_ORDER } from '../data/googleMocks';
 import { getDailyPulseForDate } from '../data/dailyPulse';
+import {
+  computeQuestProgress,
+  GOOGLE_CLOUD_DE_QUESTS,
+  TOTAL_QUEST_LEVELS,
+} from '../data/quests';
+import { getDefaultTargetInterviewDate, sanitizeAiErrorMessage } from '../utils/storage';
+import { generateDailyPulse } from '../services/geminiAiService';
 import {
   DailyPulseItem,
   GoogleRoundId,
@@ -14,29 +21,43 @@ import {
 } from '../types/platform';
 import { RankBadges } from './visuals/CelebrationAndBadges';
 import {
+  AlertTriangle,
   ArrowRight,
   Award,
   BookOpen,
+  Calendar,
+  Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Flag,
   Flame,
+  Mic,
+  Pause,
   Pin,
+  Play,
   RefreshCw,
   Repeat,
+  RotateCcw,
   Sparkles,
   Target,
   TrendingUp,
+  X,
   Zap,
 } from 'lucide-react';
 
 interface DashboardViewProps {
   progress: UserProgressState;
   onSelectTrack: (trackId: TrackId) => void;
+  onOpenQuests: () => void;
   onOpenAssessments: () => void;
   onLaunchMock: (mockNumber: number) => void;
   onOpenConcept: (conceptName: string) => void;
   onPinNote: (note: StudyNote) => void;
   onStartSm2Review: (item: Sm2ReviewItem) => void;
   onLaunchWeakSpotMock: (weakTrackIds: TrackId[]) => void;
+  onUpdateTargetDate: (isoDate: string) => void;
+  onClearBlindSpots: () => void;
 }
 
 const ProgressRing: React.FC<{ pct: number; color?: string }> = ({
@@ -79,16 +100,42 @@ const ProgressRing: React.FC<{ pct: number; color?: string }> = ({
 export const DashboardView: React.FC<DashboardViewProps> = ({
   progress,
   onSelectTrack,
+  onOpenQuests,
   onOpenAssessments,
   onLaunchMock,
   onOpenConcept,
   onPinNote,
   onStartSm2Review,
   onLaunchWeakSpotMock,
+  onUpdateTargetDate,
+  onClearBlindSpots,
 }) => {
   const [pulse, setPulse] = useState<DailyPulseItem>(() => getDailyPulseForDate(new Date()));
   const [pulseLoading, setPulseLoading] = useState(false);
+  const [pulseError, setPulseError] = useState<string | null>(null);
+  const [pulseInfo, setPulseInfo] = useState<string | null>(null);
   const [pulsePinned, setPulsePinned] = useState(false);
+  const [editingTargetDate, setEditingTargetDate] = useState(false);
+
+  // 2-Minute Intro & Architecture Pitch Rehearsal Timer state
+  const [pitchExpanded, setPitchExpanded] = useState(true);
+  const [pitchSecLeft, setPitchSecLeft] = useState(120);
+  const [pitchRunning, setPitchRunning] = useState(false);
+  const [pitchChecked, setPitchChecked] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    if (!pitchRunning) return;
+    const id = window.setInterval(() => {
+      setPitchSecLeft((prev) => {
+        if (prev <= 1) {
+          setPitchRunning(false);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [pitchRunning]);
 
   const totalQuestions = ALL_QUESTIONS.length;
   const solvedSet = useMemo(() => new Set(progress.solvedQuestionIds), [progress.solvedQuestionIds]);
@@ -195,14 +242,22 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     if (pulseLoading) return;
     setPulseLoading(true);
     setPulsePinned(false);
+    setPulseError(null);
+    setPulseInfo(null);
     try {
-      const res = await fetch('/api/ai/daily-pulse', { method: 'POST' });
-      const data = await res.json();
-      if (res.ok && data.quote && data.topicName) {
+      const data = await generateDailyPulse();
+      if (data.quote && data.topicName) {
         setPulse(data);
+        if (data.fallbackFrom) {
+          setPulseInfo(`Primary model busy — generated via ${data.modelUsed}.`);
+        } else if (data.retried) {
+          setPulseInfo(`Recovered automatically on ${data.modelUsed}.`);
+        }
+      } else {
+        throw new Error('Received incomplete Daily Pulse response. Click Retry.');
       }
-    } catch {
-      // keep existing pulse cleanly if offline
+    } catch (err: unknown) {
+      setPulseError(sanitizeAiErrorMessage(err, 'Unable to refresh Daily Pulse right now.'));
     } finally {
       setPulseLoading(false);
     }
@@ -219,6 +274,77 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     setPulsePinned(true);
     setTimeout(() => setPulsePinned(false), 2200);
   };
+
+  // Sprint / Season milestone calculations across the 50 Google Mock Interviews
+  const uniqueCompletedMockNums = useMemo(() => {
+    const s = new Set<number>();
+    for (const m of progress.mockHistory) {
+      if (m.mockNumber >= 1 && m.mockNumber <= 50) s.add(m.mockNumber);
+    }
+    return s;
+  }, [progress.mockHistory]);
+
+  const sprintCompletedCount = uniqueCompletedMockNums.size;
+  const sprintTotalTarget = 50;
+  const sprintRemainingCount = Math.max(0, sprintTotalTarget - sprintCompletedCount);
+  const nextLiveMockNumber = useMemo(() => {
+    for (let n = 1; n <= sprintTotalTarget; n++) {
+      if (!uniqueCompletedMockNums.has(n)) return n;
+    }
+    return sprintTotalTarget;
+  }, [uniqueCompletedMockNums]);
+
+  const sprintSegmentsTotal = 10;
+  const sprintSegmentsFilled =
+    sprintCompletedCount === 0
+      ? 0
+      : Math.min(
+          sprintSegmentsTotal,
+          Math.max(1, Math.round((sprintCompletedCount / sprintTotalTarget) * sprintSegmentsTotal))
+        );
+
+  const sprintTierIndex = Math.min(5, Math.floor(sprintCompletedCount / 10) + 1);
+  const targetDateStr = progress.targetInterviewDate || getDefaultTargetInterviewDate();
+  const daysLeft = useMemo(() => {
+    const todayMs = new Date(`${todayIso}T00:00:00`).getTime();
+    const targetMs = new Date(`${targetDateStr}T00:00:00`).getTime();
+    const diff = Math.ceil((targetMs - todayMs) / 86400000);
+    return Number.isFinite(diff) ? Math.max(0, diff) : 30;
+  }, [todayIso, targetDateStr]);
+
+  const dailyPaceText =
+    daysLeft > 0 && daysLeft <= 10 ? '3 Problems + 1 Design/Mock' : '2 Problems + 1 Design/Mock';
+
+  const topBlindSpots = useMemo(() => {
+    return Object.values(progress.blindSpotCounts || {})
+      .sort((a, b) => b.count - a.count || b.lastSeenAt.localeCompare(a.lastSeenAt))
+      .slice(0, 5);
+  }, [progress.blindSpotCounts]);
+
+  const pitchTotalSec = 120;
+  const pitchPct = (pitchSecLeft / pitchTotalSec) * 100;
+  const pitchRingColor =
+    pitchSecLeft <= 15 ? '#EF4444' : pitchSecLeft <= 35 ? '#F59E0B' : 'var(--accent-primary)';
+  const pitchRadius = 26;
+  const pitchCirc = 2 * Math.PI * pitchRadius;
+  const pitchDashOffset = pitchCirc - (pitchPct / 100) * pitchCirc;
+  const pitchFormatted = `${String(Math.floor(pitchSecLeft / 60)).padStart(2, '0')}:${String(
+    pitchSecLeft % 60
+  ).padStart(2, '0')}`;
+
+  const PITCH_STEPS = [
+    { id: 'hook', label: 'Hook & Role', hint: 'Staff/Senior DE focus + cloud domain' },
+    { id: 'scale', label: 'Scale & Tech Stack', hint: '10+ TB/day · BigQuery, Dataflow, Spark' },
+    { id: 'bottleneck', label: 'Hardest Bottleneck Solved', hint: 'Skew salting, dual-write, or lag' },
+    { id: 'impact', label: 'Business Impact', hint: 'Latency ↓, cost ↓, zero-loss SLA' },
+  ];
+
+  const sprintCalloutMessage =
+    sprintCompletedCount === 0
+      ? `Kick off Sprint Tier 1 with Mock #${String(nextLiveMockNumber).padStart(2, '0')}—consistent daily drills lock in Strong Hire verdicts.`
+      : sprintRemainingCount > 0
+      ? `Keep up your momentum in Tier ${sprintTierIndex} of 5—consistent daily drills lock in Strong Hire verdicts.`
+      : 'All 50 Google Cloud loops completed—keep your Hiring Committee edge sharp with SM-2 & Weak-Spot drills.';
 
   return (
     <div className="space-y-6">
@@ -256,6 +382,276 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
       </div>
 
+      {/* Season / Sprint Progress Hero Card */}
+      <motion.section
+        aria-label="Sprint Progress Hero"
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
+        className="relative overflow-hidden rounded-[24px] border border-subtle bg-card p-6 sm:p-8 shadow-sm"
+      >
+        {/* Subtle Ambient Checkered-Flag & Mountain Peak Watermark */}
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 360 280"
+          fill="none"
+          className="pointer-events-none select-none absolute -right-4 top-0 h-full w-64 sm:w-80 text-primary opacity-[0.07] dark:opacity-[0.09]"
+        >
+          {/* Mountain Ridgelines */}
+          <path
+            d="M40 275 L155 110 L220 190 L275 95 L355 275 Z"
+            fill="currentColor"
+            fillOpacity="0.22"
+          />
+          <path
+            d="M40 275 L155 110 L220 190 L275 95 L355 275"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M155 110 L176 156 L146 168 L130 148"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinejoin="round"
+            opacity="0.7"
+          />
+          {/* Summit Flagpole & Checkered Flag */}
+          <line x1="275" y1="95" x2="275" y2="28" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+          <g transform="translate(277, 30)">
+            <rect x="0" y="0" width="60" height="36" rx="3" stroke="currentColor" strokeWidth="2" />
+            <rect x="0" y="0" width="15" height="12" fill="currentColor" />
+            <rect x="30" y="0" width="15" height="12" fill="currentColor" />
+            <rect x="15" y="12" width="15" height="12" fill="currentColor" />
+            <rect x="45" y="12" width="15" height="12" fill="currentColor" />
+            <rect x="0" y="24" width="15" height="12" fill="currentColor" />
+            <rect x="30" y="24" width="15" height="12" fill="currentColor" />
+          </g>
+        </svg>
+
+        <div className="relative z-10 space-y-6">
+          {/* 1. Top Status Pill Row */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 dark:bg-[#163020] text-emerald-700 dark:text-[#4ADE80] border border-emerald-600/25 dark:border-[#4ADE80]/20">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-[#4ADE80]" />
+                Sprint progress
+              </span>
+
+              <button
+                type="button"
+                onClick={() => setEditingTargetDate((v) => !v)}
+                title="Click to set target interview date"
+                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-elevated text-primary border border-subtle hover:border-accent transition-colors tabular-nums"
+              >
+                <span>
+                  ⏳ {String(daysLeft).padStart(2, '0')} {daysLeft === 1 ? 'Day' : 'Days'} Left • Daily Target: {dailyPaceText}
+                </span>
+                <Calendar className="w-3 h-3 text-accent shrink-0" />
+              </button>
+
+              {editingTargetDate && (
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-elevated border border-accent/50 text-xs">
+                  <label htmlFor="target-interview-date" className="text-[11px] text-muted font-medium">
+                    Target:
+                  </label>
+                  <input
+                    id="target-interview-date"
+                    type="date"
+                    min={todayIso}
+                    value={targetDateStr}
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        onUpdateTargetDate(e.target.value);
+                        setEditingTargetDate(false);
+                      }
+                    }}
+                    className="bg-transparent text-xs font-mono text-primary focus:outline-none"
+                  />
+                </div>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => onLaunchMock(nextLiveMockNumber)}
+              className="btn-tactile inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 dark:bg-[#163020] text-emerald-700 dark:text-[#4ADE80] border border-emerald-600/25 dark:border-[#4ADE80]/20 hover:border-emerald-500/60"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-[#4ADE80] animate-pulse" />
+              {sprintRemainingCount > 0
+                ? `Mock #${String(nextLiveMockNumber).padStart(2, '0')} is live`
+                : 'All 50 Mocks mastered'}
+            </button>
+          </div>
+
+          {/* 2. Bold Editorial Two-Line Headline */}
+          <h2 className="font-display text-3xl sm:text-4xl font-extrabold tracking-tight leading-[1.08] text-primary max-w-xl">
+            The final stretch.
+            <br />
+            Make it count.
+          </h2>
+
+          {/* 3. Two Side-by-Side Elevated Metric Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="rounded-[16px] border border-subtle bg-elevated px-5 py-4 sm:py-5">
+              <div className="font-display text-[40px] font-extrabold leading-none tracking-tight text-primary tabular-nums">
+                {sprintCompletedCount}
+              </div>
+              <div className="mt-2 text-xs font-medium text-muted">
+                Mocks completed
+              </div>
+            </div>
+
+            <div className="rounded-[16px] border border-subtle bg-elevated px-5 py-4 sm:py-5">
+              <div className="font-display text-[40px] font-extrabold leading-none tracking-tight text-primary tabular-nums">
+                {sprintRemainingCount}
+              </div>
+              <div className="mt-2 text-xs font-medium text-muted">
+                Mocks remaining
+              </div>
+            </div>
+          </div>
+
+          {/* 4. 10-Segment Horizontal Pill Progress Bar */}
+          <div className="space-y-2">
+            <div
+              className="grid grid-cols-10 gap-1.5"
+              role="progressbar"
+              aria-valuenow={sprintCompletedCount}
+              aria-valuemin={0}
+              aria-valuemax={sprintTotalTarget}
+              aria-label="Google Mock Sprint Progress"
+            >
+              {Array.from({ length: sprintSegmentsTotal }, (_, segIdx) => {
+                const filled = segIdx < sprintSegmentsFilled;
+                return (
+                  <div
+                    key={segIdx}
+                    className={`h-[6px] rounded-full transition-all duration-300 ${
+                      filled ? '' : 'bg-subtle'
+                    }`}
+                    style={
+                      filled
+                        ? {
+                            background: 'linear-gradient(90deg, var(--accent-primary), var(--accent-secondary))',
+                            boxShadow: '0 0 10px var(--accent-glow)',
+                          }
+                        : undefined
+                    }
+                  />
+                );
+              })}
+            </div>
+            <div className="flex items-center justify-between text-[11px] font-mono text-muted tabular-nums">
+              <span>{sprintCompletedCount} / {sprintTotalTarget} Google Cloud Loops</span>
+              <span>{Math.round((sprintCompletedCount / sprintTotalTarget) * 100)}% Sprint Readiness</span>
+            </div>
+          </div>
+
+          {/* 5. Motivational Sub-Section & Bottom Callout Banner */}
+          <div className="space-y-3 pt-1">
+            <div>
+              <h3 className="font-display text-base sm:text-lg font-bold text-primary">
+                Every point counts.
+              </h3>
+              <p className="text-xs sm:text-sm text-muted mt-0.5">
+                Your cumulative accuracy{completedMocks > 0 ? ` (${accuracyPct}% pass rate · ${avgVerdict})` : ''} and mock verdicts determine your readiness for the Hiring Committee bar.
+              </p>
+            </div>
+
+            <div className="rounded-[14px] border border-subtle bg-elevated px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <span className="text-xs text-primary/90 leading-relaxed">
+                {sprintCalloutMessage}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (sprintRemainingCount > 0) {
+                    onLaunchMock(nextLiveMockNumber);
+                  } else if (sm2Items.length > 0) {
+                    onStartSm2Review(sm2Items[0]);
+                  } else {
+                    onOpenAssessments();
+                  }
+                }}
+                className="btn-tactile px-3.5 py-1.5 rounded-lg bg-accent text-accent-contrast hover:bg-accent-hover text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 self-start sm:self-auto"
+              >
+                <span>
+                  {sprintRemainingCount > 0
+                    ? `Launch Mock #${String(nextLiveMockNumber).padStart(2, '0')}`
+                    : sm2Items.length > 0
+                    ? 'Start Daily Review'
+                    : 'Open Mock Hub'}
+                </span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </motion.section>
+
+      {/* 🗺️ Google Cloud DE Quest Roadmap Quick-Launch Card */}
+      {(() => {
+        const questProgress = GOOGLE_CLOUD_DE_QUESTS.map((q) => computeQuestProgress(q, progress));
+        const questLevelsDone = questProgress.reduce((s, q) => s + q.completedCount, 0);
+        const questsCompleted = questProgress.filter((q) => q.completedCount === q.totalCount).length;
+        const questPct = Math.round((questLevelsDone / TOTAL_QUEST_LEVELS) * 100);
+        const activeQuest =
+          questProgress.find((q) => q.completedCount < q.totalCount) || questProgress[0];
+        const activeQuestMeta =
+          GOOGLE_CLOUD_DE_QUESTS.find((q) => q.id === activeQuest.questId) ||
+          GOOGLE_CLOUD_DE_QUESTS[0];
+
+        return (
+          <div className="rounded-xl border border-subtle bg-card p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 hover:border-accent/60 transition-colors">
+            <div className="space-y-1.5 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="px-2.5 py-0.5 rounded-full font-mono font-bold bg-emerald-500/15 text-emerald-700 dark:text-[#10B981] border border-emerald-600/30">
+                  🗺️ Google Cloud DE Quest
+                </span>
+                <span className="font-mono font-semibold text-accent tabular-nums">
+                  {questLevelsDone}/{TOTAL_QUEST_LEVELS} Levels · {questsCompleted}/{GOOGLE_CLOUD_DE_QUESTS.length} Quests ({questPct}%)
+                </span>
+              </div>
+              <h2 className="font-display text-base sm:text-lg font-bold text-primary truncate">
+                Interdependent Consulting &amp; Overhead Imagery Mastery Path
+              </h2>
+              <p className="text-xs text-muted truncate">
+                Next up: Quest 0{activeQuestMeta.number} ({activeQuestMeta.shortTitle}) —{' '}
+                {activeQuest.nextUnlockedLevelNumber
+                  ? `Level ${activeQuest.nextUnlockedLevelNumber} Ready`
+                  : 'All levels complete'}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 shrink-0">
+              <div className="hidden sm:flex items-center gap-1.5">
+                {questProgress.map((qp, qIdx) => (
+                  <div
+                    key={qp.questId}
+                    title={`Quest ${qIdx + 1}: ${qp.completedCount}/${qp.totalCount}`}
+                    className="w-8 h-2 rounded-full bg-subtle overflow-hidden"
+                  >
+                    <div
+                      className="h-full bg-[#10B981] transition-all duration-300"
+                      style={{ width: `${qp.pct}%` }}
+                    />
+                  </div>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={onOpenQuests}
+                className="btn-tactile px-4 py-2 rounded-lg bg-accent text-accent-contrast hover:bg-accent-hover text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0"
+              >
+                <span>Open Quest Roadmap</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ✨ Daily Byte & Engineering Pulse Card */}
       <div className="rounded-xl border border-accent/40 bg-card p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -291,6 +687,48 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </button>
           </div>
         </div>
+
+        {pulseError && (
+          <div className="rounded-lg border border-[#EF4444]/40 bg-[#EF4444]/10 px-3.5 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2 text-red-700 dark:text-[#EF4444] min-w-0">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>{pulseError}</span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                disabled={pulseLoading}
+                onClick={handleRefreshPulse}
+                className="btn-tactile px-3 py-1 rounded-md bg-accent text-accent-contrast text-[11px] font-bold hover:bg-accent-hover flex items-center gap-1"
+              >
+                <RefreshCw className="w-3 h-3" />
+                Retry
+              </button>
+              <button
+                type="button"
+                onClick={() => setPulseError(null)}
+                className="p-1 text-muted hover:text-primary"
+                aria-label="Dismiss Daily Pulse error"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {pulseInfo && !pulseError && (
+          <div className="rounded-lg border border-accent/35 bg-accent/10 px-3.5 py-1.5 text-[11px] text-primary flex items-center justify-between gap-2">
+            <span>⚡ {pulseInfo}</span>
+            <button
+              type="button"
+              onClick={() => setPulseInfo(null)}
+              className="text-muted hover:text-primary"
+              aria-label="Dismiss Daily Pulse notice"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 text-xs">
           <div className="rounded-lg border border-subtle bg-canvas p-4 space-y-2">
@@ -394,6 +832,234 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
       {/* Rank Badges */}
       <RankBadges solvedCount={solvedCount} mockCount={completedMocks} bestMockScore={bestMockScore} />
+
+      {/* Execution Coaching Row: Top 5 Blind Spots + 2-Minute Intro & Architecture Pitch Timer */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 items-start">
+        {/* 🚩 My Top Recurring Blind Spots Auto-Tracker */}
+        <div className="rounded-xl border border-subtle bg-card p-5 space-y-3.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <Flag className="w-4 h-4 text-[#EF4444] shrink-0" />
+              <div className="min-w-0">
+                <h2 className="text-sm font-bold text-primary truncate">
+                  🚩 Top 5 Blind Spots to Watch
+                </h2>
+                <p className="text-[11px] text-muted truncate">
+                  Auto-tallied from failed test assertions &amp; Lean/No-Hire mock notes
+                </p>
+              </div>
+            </div>
+            {topBlindSpots.length > 0 && (
+              <button
+                type="button"
+                onClick={onClearBlindSpots}
+                className="text-[11px] font-semibold text-muted hover:text-[#EF4444] transition-colors shrink-0"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+
+          {topBlindSpots.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-subtle bg-canvas/60 py-5 px-4 text-center text-xs text-muted">
+              No recurring blind spots logged yet. Any failed edge-case test or <span className="text-amber-600 dark:text-amber-400 font-semibold">Lean Hire / No Hire</span> mock note will automatically populate your pre-interview watchlist here.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {topBlindSpots.map((spot, idx) => (
+                <div
+                  key={spot.tag}
+                  className="rounded-lg border border-subtle bg-canvas px-3.5 py-2.5 flex items-center justify-between gap-3 text-xs"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-[11px] font-bold text-muted tabular-nums">
+                        0{idx + 1}
+                      </span>
+                      <span className="font-semibold text-primary truncate">{spot.tag}</span>
+                    </div>
+                    {spot.sampleTitle && (
+                      <div className="text-[11px] text-muted truncate mt-0.5 pl-6">
+                        Last hit: {spot.sampleTitle}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-[#EF4444]/15 text-red-700 dark:text-[#EF4444] border border-red-600/30 dark:border-[#EF4444]/35 tabular-nums">
+                      {spot.count}×
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onSelectTrack(spot.trackId || 'sql')}
+                      className="btn-tactile px-2.5 py-1 rounded-md bg-accent/15 text-accent text-[11px] font-semibold hover:bg-accent hover:text-accent-contrast"
+                    >
+                      Drill →
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 🎙️ 2-Minute Intro & Architecture Pitch Rehearsal Timer */}
+        <div className="rounded-xl border border-subtle bg-card p-5 space-y-3.5">
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => setPitchExpanded((v) => !v)}
+              className="flex items-center gap-2 text-left min-w-0 group"
+            >
+              <Mic className="w-4 h-4 text-accent shrink-0" />
+              <div className="min-w-0">
+                <h2 className="text-sm font-bold text-primary group-hover:text-accent transition-colors truncate">
+                  🎙️ 2-Minute Intro &amp; Architecture Pitch
+                </h2>
+                <p className="text-[11px] text-muted truncate">
+                  120-second rehearsal timer · Hook → Scale → Bottleneck → Impact
+                </p>
+              </div>
+            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              {!pitchExpanded && (
+                <span className="font-mono text-xs font-bold text-accent tabular-nums">
+                  {pitchFormatted}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => setPitchExpanded((v) => !v)}
+                aria-label={pitchExpanded ? 'Collapse pitch timer' : 'Expand pitch timer'}
+                className="p-1.5 rounded-lg border border-subtle bg-canvas text-muted hover:text-primary hover:border-accent transition-colors"
+              >
+                {pitchExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+          </div>
+
+          {pitchExpanded && (
+            <div className="space-y-3.5">
+              {/* Countdown Ring + Controls */}
+              <div className="rounded-lg border border-subtle bg-canvas p-3.5 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3.5">
+                  <div className="relative w-16 h-16 shrink-0 flex items-center justify-center">
+                    <svg className="w-16 h-16 -rotate-90" viewBox="0 0 64 64">
+                      <circle
+                        cx="32"
+                        cy="32"
+                        r={pitchRadius}
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="4.5"
+                        className="text-subtle"
+                      />
+                      <circle
+                        cx="32"
+                        cy="32"
+                        r={pitchRadius}
+                        fill="none"
+                        stroke={pitchRingColor}
+                        strokeWidth="4.5"
+                        strokeLinecap="round"
+                        strokeDasharray={pitchCirc}
+                        strokeDashoffset={pitchDashOffset}
+                        className="transition-[stroke-dashoffset,stroke] duration-300"
+                      />
+                    </svg>
+                    <span className="absolute font-mono text-xs font-bold text-primary tabular-nums">
+                      {pitchFormatted}
+                    </span>
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-primary">
+                      {pitchSecLeft === 0
+                        ? 'Time! Wrap up Business Impact.'
+                        : pitchSecLeft <= 20
+                        ? 'Final 20s — Land your metrics!'
+                        : pitchRunning
+                        ? 'Rehearsing live pitch...'
+                        : 'Ready for 2-minute dry run'}
+                    </div>
+                    <div className="text-[11px] text-muted mt-0.5 tabular-nums">
+                      {Object.values(pitchChecked).filter(Boolean).length}/4 beats covered
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (pitchSecLeft === 0) setPitchSecLeft(120);
+                      setPitchRunning((r) => !r);
+                    }}
+                    className="btn-tactile px-3 py-1.5 rounded-lg bg-accent text-accent-contrast hover:bg-accent-hover text-xs font-bold flex items-center gap-1.5"
+                  >
+                    {pitchRunning ? (
+                      <>
+                        <Pause className="w-3.5 h-3.5" /> Pause
+                      </>
+                    ) : (
+                      <>
+                        <Play className="w-3.5 h-3.5" /> {pitchSecLeft < 120 && pitchSecLeft > 0 ? 'Resume' : 'Start'}
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPitchRunning(false);
+                      setPitchSecLeft(120);
+                      setPitchChecked({});
+                    }}
+                    title="Reset timer & checklist"
+                    className="btn-tactile p-1.5 rounded-lg border border-subtle bg-card text-muted hover:text-primary hover:border-accent"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* 4-Beat Flow Checklist */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {PITCH_STEPS.map((step, idx) => {
+                  const checked = !!pitchChecked[step.id];
+                  return (
+                    <button
+                      key={step.id}
+                      type="button"
+                      onClick={() =>
+                        setPitchChecked((prev) => ({ ...prev, [step.id]: !prev[step.id] }))
+                      }
+                      className={`text-left rounded-lg border px-3 py-2 transition-colors flex items-start gap-2.5 text-xs ${
+                        checked
+                          ? 'bg-[#10B981]/10 border-emerald-600/40 dark:border-[#10B981]/40'
+                          : 'bg-canvas border-subtle hover:border-accent/50'
+                      }`}
+                    >
+                      <span
+                        className={`mt-0.5 w-4 h-4 rounded flex items-center justify-center shrink-0 border ${
+                          checked
+                            ? 'bg-[#10B981] border-[#10B981] text-[#09090B]'
+                            : 'border-subtle bg-card text-muted'
+                        }`}
+                      >
+                        {checked ? <Check className="w-3 h-3" /> : <span className="text-[10px] font-mono">{idx + 1}</span>}
+                      </span>
+                      <div className="min-w-0">
+                        <div className={`font-semibold truncate ${checked ? 'text-emerald-700 dark:text-[#10B981]' : 'text-primary'}`}>
+                          {step.label}
+                        </div>
+                        <div className="text-[10px] text-muted truncate">{step.hint}</div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* 🔁 SM-2 Spaced Repetition Review Queue */}
       <div className="rounded-xl border border-subtle bg-card p-5 space-y-3">

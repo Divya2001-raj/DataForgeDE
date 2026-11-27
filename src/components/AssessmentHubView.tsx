@@ -16,6 +16,16 @@ import {
   UserProgressState,
 } from '../types/platform';
 import { runSqlInBrowser } from '../utils/sqlRunner';
+import { sanitizeAiErrorMessage } from '../utils/storage';
+import { runMockInterviewTurn, transcribeAudioBlob } from '../services/geminiAiService';
+import {
+  AudioRecordingHandle,
+  base64Pcm16ToAudioBuffer,
+  computeOutputBufferRms,
+  computeRmsLevel,
+  float32ToPcm16Base64,
+  startMicRecording,
+} from '../utils/liveAudio';
 import { AnimeCharacterAvatar } from './visuals/AnimeCharacterAvatar';
 import { CelebrationBurst } from './visuals/CelebrationAndBadges';
 import {
@@ -25,16 +35,21 @@ import {
   ChevronRight,
   Clock,
   Lock,
+  MessageSquare,
   Mic,
   MicOff,
   PhoneOff,
   Play,
+  Radio,
+  RefreshCw,
   Send,
   ShieldCheck,
   Sparkles,
+  Square,
   Unlock,
   Volume2,
   VolumeX,
+  X,
 } from 'lucide-react';
 
 interface AssessmentHubViewProps {
@@ -105,47 +120,406 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
   const [sqlPreviewOutput, setSqlPreviewOutput] = useState<string | null>(null);
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
   const [nodTrigger, setNodTrigger] = useState(0);
-  const [ttsEnabled, setTtsEnabled] = useState(true);
-  const [isListening, setIsListening] = useState(false);
+
+  // Gemini Live Voice & Technical Audio Transcription states
+  const [voiceMode, setVoiceMode] = useState<'live' | 'text'>('text');
+  const [liveStatus, setLiveStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle');
+  const [liveMicMuted, setLiveMicMuted] = useState(false);
+  const [liveSpeakerMuted, setLiveSpeakerMuted] = useState(false);
+  const [aiAudioLevel, setAiAudioLevel] = useState(0);
+  const [micAudioLevel, setMicAudioLevel] = useState(0);
+  const [liveInputDraft, setLiveInputDraft] = useState('');
+  const [liveOutputDraft, setLiveOutputDraft] = useState('');
+  const [recordingTarget, setRecordingTarget] = useState<'turn' | 'clarify' | null>(null);
+  const [transcribingTarget, setTranscribingTarget] = useState<'turn' | 'clarify' | null>(null);
+
   const [aiThinking, setAiThinking] = useState(false);
+  const [aiBanner, setAiBanner] = useState<{
+    type: 'retry' | 'info';
+    message: string;
+    retryLabel?: string;
+    retryAction?: () => void;
+  } | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [lastCandidateActivitySec, setLastCandidateActivitySec] = useState(0);
   const [thinkAloudNudgeDismissed, setThinkAloudNudgeDismissed] = useState(false);
   const [finalScorecard, setFinalScorecard] = useState<ScorecardData | null>(null);
   const [showVerdictCelebration, setShowVerdictCelebration] = useState(false);
 
-  const recognitionRef = useRef<{ stop: () => void } | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const transcriptRef = useRef<TranscriptTurn[]>([]);
+  const wsRef = useRef<WebSocket | null>(null);
+  const inputCtxRef = useRef<AudioContext | null>(null);
+  const outputCtxRef = useRef<AudioContext | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const nextStartTimeRef = useRef<number>(0);
+  const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const liveSessionActiveRef = useRef<boolean>(false);
+  const liveMicMutedRef = useRef<boolean>(false);
+  const liveSpeakerMutedRef = useRef<boolean>(false);
+  const liveInputBufferRef = useRef<string>('');
+  const liveOutputBufferRef = useRef<string>('');
+  const lastLevelUpdateRef = useRef<number>(0);
+  const elapsedSecRef = useRef<number>(0);
+  const audioRecRef = useRef<AudioRecordingHandle | null>(null);
 
   const activeRoundStep = activeMock?.sixRounds[currentRoundIdx] || activeMock?.sixRounds[0];
   const currentInterviewer: InterviewerProfile | undefined = activeRoundStep?.interviewer || activeMock?.interviewerProfile;
 
-  const speakText = (text: string, profile?: InterviewerProfile) => {
-    if (!ttsEnabled || typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      setIsAiSpeaking(true);
-      setTimeout(() => setIsAiSpeaking(false), Math.min(4500, Math.max(1500, text.length * 32)));
-      return;
-    }
-    window.speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance(text);
-    utter.rate = profile?.voiceRate ?? 1.02;
-    utter.pitch = profile?.voicePitch ?? 1.0;
+  useEffect(() => {
+    transcriptRef.current = transcript;
+  }, [transcript]);
 
-    // Match system voice preference by gender when available
-    const voices = window.speechSynthesis.getVoices();
-    if (voices.length > 0 && profile) {
-      const targetVoice = voices.find((v) =>
-        profile.voiceGender === 'female'
-          ? /female|samantha|victoria|karen|zira|google.*us/i.test(v.name)
-          : /male|daniel|alex|david|google.*uk.*male/i.test(v.name)
-      );
-      if (targetVoice) utter.voice = targetVoice;
+  useEffect(() => {
+    elapsedSecRef.current = elapsedSec;
+  }, [elapsedSec]);
+
+  useEffect(() => {
+    liveMicMutedRef.current = liveMicMuted;
+    if (liveMicMuted) {
+      setMicAudioLevel(0);
+    }
+  }, [liveMicMuted]);
+
+  useEffect(() => {
+    liveSpeakerMutedRef.current = liveSpeakerMuted;
+    if (liveSpeakerMuted) {
+      activeSourcesRef.current.forEach((s) => {
+        try {
+          s.stop();
+        } catch {
+          // ignore
+        }
+      });
+      activeSourcesRef.current = [];
+      nextStartTimeRef.current = 0;
+      setIsAiSpeaking(false);
+      setAiAudioLevel(0);
+    }
+  }, [liveSpeakerMuted]);
+
+  const stopAllAiAudioPlayback = () => {
+    activeSourcesRef.current.forEach((src) => {
+      try {
+        src.stop();
+      } catch {
+        // ignore already-stopped nodes
+      }
+    });
+    activeSourcesRef.current = [];
+    nextStartTimeRef.current = 0;
+    setIsAiSpeaking(false);
+    setAiAudioLevel(0);
+  };
+
+  const commitLiveSpeakerBuffer = (speaker: 'candidate' | 'interviewer') => {
+    if (speaker === 'candidate') {
+      const text = liveInputBufferRef.current.trim();
+      liveInputBufferRef.current = '';
+      setLiveInputDraft('');
+      if (text) {
+        setTranscript((prev) => [...prev, { speaker: 'candidate', text }]);
+      }
+      return text;
+    }
+    const text = liveOutputBufferRef.current.trim();
+    liveOutputBufferRef.current = '';
+    setLiveOutputDraft('');
+    if (text) {
+      setTranscript((prev) => [...prev, { speaker: 'interviewer', text }]);
+    }
+    return text;
+  };
+
+  const getFlushedTranscriptSnapshot = (): TranscriptTurn[] => {
+    const flushed: TranscriptTurn[] = [...transcriptRef.current];
+    const inText = liveInputBufferRef.current.trim();
+    const outText = liveOutputBufferRef.current.trim();
+    if (inText) {
+      flushed.push({ speaker: 'candidate', text: inText });
+      liveInputBufferRef.current = '';
+      setLiveInputDraft('');
+    }
+    if (outText) {
+      flushed.push({ speaker: 'interviewer', text: outText });
+      liveOutputBufferRef.current = '';
+      setLiveOutputDraft('');
+    }
+    setTranscript(flushed);
+    return flushed;
+  };
+
+  const stopLiveVoiceSession = (switchToTextMode = true) => {
+    liveSessionActiveRef.current = false;
+    getFlushedTranscriptSnapshot();
+
+    if (wsRef.current) {
+      try {
+        if (wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'stop' }));
+        }
+        wsRef.current.close();
+      } catch {
+        // ignore
+      }
+      wsRef.current = null;
     }
 
-    utter.onstart = () => setIsAiSpeaking(true);
-    utter.onend = () => setIsAiSpeaking(false);
-    utter.onerror = () => setIsAiSpeaking(false);
-    window.speechSynthesis.speak(utter);
+    if (processorRef.current) {
+      try {
+        processorRef.current.disconnect();
+      } catch {
+        // ignore
+      }
+      processorRef.current = null;
+    }
+
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((t) => t.stop());
+      micStreamRef.current = null;
+    }
+
+    if (inputCtxRef.current) {
+      inputCtxRef.current.close().catch(() => undefined);
+      inputCtxRef.current = null;
+    }
+
+    if (outputCtxRef.current) {
+      outputCtxRef.current.close().catch(() => undefined);
+      outputCtxRef.current = null;
+    }
+
+    stopAllAiAudioPlayback();
+    setMicAudioLevel(0);
+    setLiveStatus('idle');
+    if (switchToTextMode) {
+      setVoiceMode('text');
+    }
+  };
+
+  const startLiveVoiceSession = async () => {
+    if (!activeMock || !activeRoundStep) return;
+
+    if (audioRecRef.current) {
+      audioRecRef.current.cancel();
+      audioRecRef.current = null;
+      setRecordingTarget(null);
+    }
+
+    stopLiveVoiceSession(false);
+    setVoiceMode('live');
+    setLiveStatus('connecting');
+    setAiBanner(null);
+
+    try {
+      if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+        throw new Error('Microphone access is unavailable in this browser. Switched to Text Mode.');
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      micStreamRef.current = stream;
+
+      const inputCtx = new AudioContext({ sampleRate: 16000 });
+      if (inputCtx.state === 'suspended') {
+        await inputCtx.resume();
+      }
+      inputCtxRef.current = inputCtx;
+
+      const outputCtx = new AudioContext({ sampleRate: 24000 });
+      if (outputCtx.state === 'suspended') {
+        await outputCtx.resume();
+      }
+      outputCtxRef.current = outputCtx;
+      nextStartTimeRef.current = 0;
+
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/live-interview`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        ws.send(
+          JSON.stringify({
+            type: 'setup',
+            payload: {
+              mockTitle: activeMock.title,
+              mockCode: activeMock.code,
+              roundLabel: activeRoundStep.roundLabel,
+              roundType: activeRoundStep.roundType,
+              roundNumber: activeRoundStep.roundNumber,
+              interviewerName: activeRoundStep.interviewer.name,
+              interviewerRole: `${activeRoundStep.interviewer.role} (${activeRoundStep.interviewer.team})`,
+              voiceGender: activeRoundStep.interviewer.voiceGender,
+              questionPrompt: activeRoundStep.questionPrompt,
+              expectedSignals: activeRoundStep.expectedSignals,
+              clarifyingNotes,
+              targetLevel,
+              sev1Incident: activeSev1Incident || undefined,
+              scratchpad,
+              transcript: transcriptRef.current,
+            },
+          })
+        );
+
+        const source = inputCtx.createMediaStreamSource(stream);
+        const processor = inputCtx.createScriptProcessor(4096, 1, 1);
+        const zeroGain = inputCtx.createGain();
+        zeroGain.gain.value = 0;
+
+        processor.onaudioprocess = (event) => {
+          if (
+            !liveSessionActiveRef.current ||
+            liveMicMutedRef.current ||
+            wsRef.current?.readyState !== WebSocket.OPEN
+          ) {
+            return;
+          }
+
+          const float32 = event.inputBuffer.getChannelData(0);
+          const rms = computeRmsLevel(float32);
+          const now = Date.now();
+          if (now - lastLevelUpdateRef.current > 65) {
+            lastLevelUpdateRef.current = now;
+            setMicAudioLevel(rms);
+            if (rms > 0.09) {
+              setLastCandidateActivitySec(elapsedSecRef.current);
+              setThinkAloudNudgeDismissed(false);
+            }
+          }
+
+          const base64Audio = float32ToPcm16Base64(float32);
+          wsRef.current.send(JSON.stringify({ type: 'audio', audio: base64Audio }));
+        };
+
+        source.connect(processor);
+        processor.connect(zeroGain);
+        zeroGain.connect(inputCtx.destination);
+        processorRef.current = processor;
+      };
+
+      ws.onmessage = (event) => {
+        let msg: {
+          type?: string;
+          data?: string;
+          text?: string;
+          message?: string;
+        };
+        try {
+          msg = JSON.parse(event.data as string) as typeof msg;
+        } catch {
+          return;
+        }
+
+        if (msg.type === 'ready') {
+          liveSessionActiveRef.current = true;
+          setLiveStatus('connected');
+          return;
+        }
+
+        if (msg.type === 'audio' && msg.data && outputCtxRef.current && !liveSpeakerMutedRef.current) {
+          const ctx = outputCtxRef.current;
+          const buffer = base64Pcm16ToAudioBuffer(ctx, msg.data);
+          const startTime = Math.max(ctx.currentTime, nextStartTimeRef.current);
+          const srcNode = ctx.createBufferSource();
+          srcNode.buffer = buffer;
+          srcNode.connect(ctx.destination);
+          srcNode.start(startTime);
+          nextStartTimeRef.current = startTime + buffer.duration;
+          activeSourcesRef.current.push(srcNode);
+
+          setIsAiSpeaking(true);
+          setAiAudioLevel(computeOutputBufferRms(buffer));
+
+          srcNode.onended = () => {
+            activeSourcesRef.current = activeSourcesRef.current.filter((n) => n !== srcNode);
+            if (activeSourcesRef.current.length === 0) {
+              setIsAiSpeaking(false);
+              setAiAudioLevel(0);
+            }
+          };
+          return;
+        }
+
+        if (msg.type === 'interrupted') {
+          stopAllAiAudioPlayback();
+          commitLiveSpeakerBuffer('interviewer');
+          return;
+        }
+
+        if (msg.type === 'inputTranscript' && msg.text) {
+          if (liveOutputBufferRef.current.trim()) {
+            commitLiveSpeakerBuffer('interviewer');
+          }
+          liveInputBufferRef.current += msg.text;
+          setLiveInputDraft(liveInputBufferRef.current);
+          setLastCandidateActivitySec(elapsedSecRef.current);
+          return;
+        }
+
+        if (msg.type === 'outputTranscript' && msg.text) {
+          if (liveInputBufferRef.current.trim()) {
+            commitLiveSpeakerBuffer('candidate');
+          }
+          liveOutputBufferRef.current += msg.text;
+          setLiveOutputDraft(liveOutputBufferRef.current);
+          return;
+        }
+
+        if (msg.type === 'turnComplete') {
+          commitLiveSpeakerBuffer('candidate');
+          commitLiveSpeakerBuffer('interviewer');
+          setNodTrigger((n) => n + 1);
+          return;
+        }
+
+        if (msg.type === 'error') {
+          setLiveStatus('error');
+          setAiBanner({
+            type: 'retry',
+            message: sanitizeAiErrorMessage(msg.message, 'Live Voice session encountered an error.'),
+            retryLabel: 'Reconnect Live Voice',
+            retryAction: () => startLiveVoiceSession(),
+          });
+          stopLiveVoiceSession(true);
+          return;
+        }
+
+        if (msg.type === 'closed') {
+          if (liveSessionActiveRef.current) {
+            stopLiveVoiceSession(true);
+          }
+        }
+      };
+
+      ws.onerror = () => {
+        setLiveStatus('error');
+        setAiBanner({
+          type: 'retry',
+          message: 'Live Voice WebSocket disconnected. You can continue in Text Mode or reconnect.',
+          retryLabel: 'Reconnect Live Voice',
+          retryAction: () => startLiveVoiceSession(),
+        });
+        stopLiveVoiceSession(true);
+      };
+    } catch (err: unknown) {
+      setLiveStatus('error');
+      setVoiceMode('text');
+      setAiBanner({
+        type: 'retry',
+        message: sanitizeAiErrorMessage(
+          err,
+          'Microphone permission is required for Live Voice Mode. Switched to Text Mode.'
+        ),
+        retryLabel: 'Retry Live Voice',
+        retryAction: () => startLiveVoiceSession(),
+      });
+    }
   };
 
   useEffect(() => {
@@ -156,6 +530,13 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
   // Initialize state whenever the active round step changes (1 -> 6)
   useEffect(() => {
     if (!activeMock || !activeRoundStep) return;
+    stopLiveVoiceSession(true);
+    if (audioRecRef.current) {
+      audioRecRef.current.cancel();
+      audioRecRef.current = null;
+      setRecordingTarget(null);
+    }
+
     setGcaGateUnlocked(false);
     setClarifyingInput('');
     setClarifyingNotes('');
@@ -167,26 +548,29 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
     setElapsedSec(0);
     setLastCandidateActivitySec(0);
     setThinkAloudNudgeDismissed(false);
+    setAiBanner(null);
+    liveInputBufferRef.current = '';
+    liveOutputBufferRef.current = '';
+    setLiveInputDraft('');
+    setLiveOutputDraft('');
 
     const intro = `Hi, I am ${activeRoundStep.interviewer.name}, ${activeRoundStep.interviewer.role} on ${activeRoundStep.interviewer.team}. Welcome to ${activeRoundStep.roundLabel} of ${activeMock.code}. Before writing code or drawing diagrams, take up to 2 minutes to ask clarifying questions: ${activeRoundStep.questionPrompt}`;
     setTranscript([{ speaker: 'interviewer', text: intro }]);
-    speakText(intro, activeRoundStep.interviewer);
 
     const timer = setInterval(() => setElapsedSec((s) => s + 1), 1000);
     return () => {
       clearInterval(timer);
-      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-      }
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
+      stopLiveVoiceSession(true);
+      if (audioRecRef.current) {
+        audioRecRef.current.cancel();
+        audioRecRef.current = null;
       }
     };
   }, [activeMock?.id, currentRoundIdx]);
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [transcript, aiThinking]);
+  }, [transcript, liveInputDraft, liveOutputDraft, aiThinking]);
 
   const showThinkAloudNudge =
     gcaGateUnlocked &&
@@ -194,63 +578,126 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
     !thinkAloudNudgeDismissed &&
     elapsedSec - lastCandidateActivitySec >= 90;
 
-  const toggleVoiceMic = () => {
-    const win = window as unknown as {
-      SpeechRecognition?: new () => {
-        continuous: boolean;
-        interimResults: boolean;
-        lang: string;
-        onresult: (ev: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void;
-        onend: () => void;
-        start: () => void;
-        stop: () => void;
-      };
-      webkitSpeechRecognition?: new () => {
-        continuous: boolean;
-        interimResults: boolean;
-        lang: string;
-        onresult: (ev: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void;
-        onend: () => void;
-        start: () => void;
-        stop: () => void;
-      };
-    };
+  const toggleAudioTranscription = async (target: 'turn' | 'clarify') => {
+    if (transcribingTarget) return;
 
-    if (isListening && recognitionRef.current) {
-      recognitionRef.current.stop();
-      setIsListening(false);
-      return;
-    }
-
-    const SpeechRec = win.SpeechRecognition || win.webkitSpeechRecognition;
-    if (!SpeechRec) {
-      setCandidateInput((prev) =>
-        prev || 'Web Speech Recognition unavailable in this browser—please type your response below.'
-      );
-      return;
-    }
-
-    const rec = new SpeechRec();
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.lang = 'en-US';
-    rec.onresult = (ev) => {
-      let combined = '';
-      for (let i = 0; i < ev.results.length; i++) {
-        combined += ev.results[i][0].transcript + ' ';
+    if (recordingTarget === target && audioRecRef.current) {
+      const handle = audioRecRef.current;
+      audioRecRef.current = null;
+      setRecordingTarget(null);
+      setTranscribingTarget(target);
+      setAiBanner(null);
+      try {
+        const blob = await handle.stop();
+        const contextHint = activeRoundStep
+          ? `${activeRoundStep.roundType}: ${activeRoundStep.questionPrompt}`
+          : undefined;
+        const result = await transcribeAudioBlob(blob, contextHint);
+        const text = result.transcript.trim();
+        if (text) {
+          if (target === 'clarify') {
+            setClarifyingInput((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text));
+          } else {
+            setCandidateInput((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text));
+          }
+          setLastCandidateActivitySec(elapsedSecRef.current);
+        } else {
+          setAiBanner({
+            type: 'info',
+            message: 'No speech detected in the recording. Please try speaking closer to the mic.',
+          });
+        }
+      } catch (err: unknown) {
+        setAiBanner({
+          type: 'retry',
+          message: sanitizeAiErrorMessage(err, 'Audio transcription failed. Please try again.'),
+        });
+      } finally {
+        setTranscribingTarget(null);
       }
-      setCandidateInput(combined.trim());
-    };
-    rec.onend = () => setIsListening(false);
-    rec.start();
-    recognitionRef.current = rec;
-    setIsListening(true);
+      return;
+    }
+
+    if (audioRecRef.current) {
+      audioRecRef.current.cancel();
+      audioRecRef.current = null;
+    }
+
+    try {
+      setAiBanner(null);
+      const handle = await startMicRecording();
+      audioRecRef.current = handle;
+      setRecordingTarget(target);
+    } catch (err: unknown) {
+      setAiBanner({
+        type: 'retry',
+        message: sanitizeAiErrorMessage(
+          err,
+          'Microphone permission is required for Gemini Audio Transcription.'
+        ),
+      });
+    }
+  };
+
+  const sendInterviewTurnRequest = async (
+    turnTranscript: TranscriptTurn[],
+    clarifyText: string,
+    incidentText?: string
+  ) => {
+    if (!activeMock || !activeRoundStep) return;
+    setAiThinking(true);
+    setAiBanner(null);
+
+    try {
+      const data = await runMockInterviewTurn({
+        mockTitle: activeMock.title,
+        roundType: activeRoundStep.roundType,
+        roundNumber: activeRoundStep.roundNumber,
+        interviewerName: activeRoundStep.interviewer.name,
+        interviewerRole: `${activeRoundStep.interviewer.role} (${activeRoundStep.interviewer.team})`,
+        questionPrompt: activeRoundStep.questionPrompt,
+        expectedSignals: activeRoundStep.expectedSignals,
+        clarifyingNotes: clarifyText,
+        transcript: turnTranscript,
+        candidateCodeOrNotes: scratchpad,
+        targetLevel,
+        sev1Incident: incidentText,
+        finishInterview: false,
+      });
+      if (data.fallbackFrom) {
+        setAiBanner({
+          type: 'info',
+          message: `Primary model busy — interviewer responded via ${data.modelUsed}.`,
+        });
+      } else if (data.retried) {
+        setAiBanner({
+          type: 'info',
+          message: `Recovered automatically on ${data.modelUsed}.`,
+        });
+      }
+      const replyText =
+        data.reply ||
+        'Thanks for walking through that. Could you clarify how you handle late-arriving partitions and data skew here?';
+      setTranscript((prev) => [...prev, { speaker: 'interviewer', text: replyText }]);
+      setNodTrigger((n) => n + 1);
+    } catch (err: unknown) {
+      setAiBanner({
+        type: 'retry',
+        message: sanitizeAiErrorMessage(err, 'Interviewer response failed due to temporary load.'),
+        retryLabel: 'Retry Turn',
+        retryAction: () => sendInterviewTurnRequest(turnTranscript, clarifyText, incidentText),
+      });
+    } finally {
+      setAiThinking(false);
+    }
   };
 
   const handleSubmitClarifyingGate = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!activeMock || !activeRoundStep || aiThinking) return;
-    const msgText = clarifyingInput.trim() || 'Clarifying Qs: Checking scale SLA, out-of-order late arrival bounds, and key cardinality/skew assumptions before coding.';
+    const msgText =
+      clarifyingInput.trim() ||
+      'Clarifying Qs: Checking scale SLA, out-of-order late arrival bounds, and key cardinality/skew assumptions before coding.';
     setClarifyingNotes(msgText);
     setGcaGateUnlocked(true);
     setLastCandidateActivitySec(elapsedSec);
@@ -261,42 +708,18 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
     ];
     setTranscript(nextTranscript);
     setClarifyingInput('');
-    setAiThinking(true);
 
-    try {
-      const res = await fetch('/api/ai/mock-interview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mockTitle: activeMock.title,
-          roundType: activeRoundStep.roundType,
-          roundNumber: activeRoundStep.roundNumber,
-          interviewerName: activeRoundStep.interviewer.name,
-          interviewerRole: `${activeRoundStep.interviewer.role} (${activeRoundStep.interviewer.team})`,
-          questionPrompt: activeRoundStep.questionPrompt,
-          expectedSignals: activeRoundStep.expectedSignals,
-          clarifyingNotes: msgText,
-          transcript: nextTranscript,
-          candidateCodeOrNotes: scratchpad,
-          targetLevel,
-          sev1Incident: activeSev1Incident || undefined,
-          finishInterview: false,
-        }),
-      });
-      const data = await res.json();
-      const reply = res.ok
-        ? data.reply
-        : `Great clarifying checks. Assume p99 SLA under 5 seconds and expect hot-key skew—editor is unlocked, go ahead and think aloud as you build!`;
-      setTranscript((prev) => [...prev, { speaker: 'interviewer', text: reply }]);
-      setNodTrigger((n) => n + 1);
-      speakText(reply, activeRoundStep.interviewer);
-    } catch {
-      const reply = `Good clarifying checks. Assume p99 SLA under 5s and expect hot-key skew—the editor is unlocked now, please talk me through your design!`;
-      setTranscript((prev) => [...prev, { speaker: 'interviewer', text: reply }]);
-      speakText(reply, activeRoundStep.interviewer);
-    } finally {
-      setAiThinking(false);
+    if (voiceMode === 'live' && liveSessionActiveRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'text',
+          text: `The candidate submitted their GCA Clarifying Questions and unlocked the shared editor: "${msgText}". Briefly answer these constraints and invite them to start walking through their solution.`,
+        })
+      );
+      return;
     }
+
+    await sendInterviewTurnRequest(nextTranscript, msgText, activeSev1Incident || undefined);
   };
 
   const triggerSev1Incident = () => {
@@ -305,16 +728,20 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
     const chosen = candidates[Math.floor(Math.random() * candidates.length)] || SEV1_INCIDENTS[0];
     setActiveSev1Incident(chosen);
     setTranscript((prev) => [...prev, { speaker: 'interviewer', text: `🚨 [LIVE SEV-1 PRODUCTION ALERT] ${chosen}` }]);
-    speakText(chosen, activeRoundStep.interviewer);
+
+    if (voiceMode === 'live' && liveSessionActiveRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'text',
+          text: `URGENT SEV-1 INCIDENT CURVEBALL TRIGGERED: "${chosen}". Deliver this alert to the candidate right now and ask for their first 15 minutes of triage.`,
+        })
+      );
+    }
   };
 
   const handleSendTurn = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!activeMock || !activeRoundStep || !candidateInput.trim() || aiThinking) return;
-    if (isListening && recognitionRef.current) {
-      recognitionRef.current.stop();
-      setIsListening(false);
-    }
 
     setLastCandidateActivitySec(elapsedSec);
     setThinkAloudNudgeDismissed(false);
@@ -327,52 +754,30 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
       setActiveSev1Incident(incidentForTurn);
     }
 
+    const userText = candidateInput.trim();
     const nextTranscript: TranscriptTurn[] = [
       ...transcript,
-      { speaker: 'candidate', text: candidateInput.trim() },
+      { speaker: 'candidate', text: userText },
       ...(autoDropSev1 && incidentForTurn
         ? [{ speaker: 'interviewer' as const, text: `🚨 [LIVE SEV-1 PRODUCTION ALERT] ${incidentForTurn}` }]
         : []),
     ];
     setTranscript(nextTranscript);
     setCandidateInput('');
-    setAiThinking(true);
 
-    try {
-      const res = await fetch('/api/ai/mock-interview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mockTitle: activeMock.title,
-          roundType: activeRoundStep.roundType,
-          roundNumber: activeRoundStep.roundNumber,
-          interviewerName: activeRoundStep.interviewer.name,
-          interviewerRole: `${activeRoundStep.interviewer.role} (${activeRoundStep.interviewer.team})`,
-          questionPrompt: activeRoundStep.questionPrompt,
-          expectedSignals: activeRoundStep.expectedSignals,
-          clarifyingNotes,
-          transcript: nextTranscript,
-          candidateCodeOrNotes: scratchpad,
-          targetLevel,
-          sev1Incident: incidentForTurn || undefined,
-          finishInterview: false,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Interviewer turn failed');
-      setTranscript((prev) => [...prev, { speaker: 'interviewer', text: data.reply }]);
-      setNodTrigger((n) => n + 1);
-      speakText(data.reply, activeRoundStep.interviewer);
-    } catch {
-      const fallback = incidentForTurn
-        ? `Let's switch immediately to Sev-1 triage—walk me through the first telemetry dashboards you check, how you halt blast radius, and what you tell stakeholders.`
-        : `Thanks for sharing that. Let's inspect ${activeRoundStep.expectedSignals[0]} — how would your solution behave during a 10x skew burst?`;
-      setTranscript((prev) => [...prev, { speaker: 'interviewer', text: fallback }]);
-      setNodTrigger((n) => n + 1);
-      speakText(fallback, activeRoundStep.interviewer);
-    } finally {
-      setAiThinking(false);
+    if (voiceMode === 'live' && liveSessionActiveRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'text',
+          text: autoDropSev1 && incidentForTurn
+            ? `Candidate response: "${userText}". Current editor buffer:\n${scratchpad || '(empty)'}\n\nRespond briefly, then immediately pivot to this SEV-1 alert: ${incidentForTurn}`
+            : `Candidate typed: "${userText}". Current editor buffer:\n${scratchpad || '(empty)'}\n\nRespond concisely by voice and ask one sharp follow-up.`,
+        })
+      );
+      return;
     }
+
+    await sendInterviewTurnRequest(nextTranscript, clarifyingNotes, incidentForTurn || undefined);
   };
 
   const triggerVerdictBurst = (verdict: string) => {
@@ -385,30 +790,37 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
 
   const handleFinishAndGrade = async () => {
     if (!activeMock || !activeRoundStep || aiThinking) return;
+    const fullTranscript = getFlushedTranscriptSnapshot();
+    if (voiceMode === 'live') {
+      stopLiveVoiceSession(true);
+    }
+
     setAiThinking(true);
+    setAiBanner(null);
     try {
-      const res = await fetch('/api/ai/mock-interview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mockTitle: activeMock.title,
-          roundType: activeRoundStep.roundType,
-          roundNumber: activeRoundStep.roundNumber,
-          interviewerName: activeRoundStep.interviewer.name,
-          interviewerRole: `${activeRoundStep.interviewer.role} (${activeRoundStep.interviewer.team})`,
-          questionPrompt: activeRoundStep.questionPrompt,
-          expectedSignals: activeRoundStep.expectedSignals,
-          clarifyingNotes,
-          transcript,
-          candidateCodeOrNotes: scratchpad,
-          targetLevel,
-          sev1Incident: activeSev1Incident || undefined,
-          finishInterview: true,
-        }),
+      const data = await runMockInterviewTurn({
+        mockTitle: activeMock.title,
+        roundType: activeRoundStep.roundType,
+        roundNumber: activeRoundStep.roundNumber,
+        interviewerName: activeRoundStep.interviewer.name,
+        interviewerRole: `${activeRoundStep.interviewer.role} (${activeRoundStep.interviewer.team})`,
+        questionPrompt: activeRoundStep.questionPrompt,
+        expectedSignals: activeRoundStep.expectedSignals,
+        clarifyingNotes,
+        transcript: fullTranscript,
+        candidateCodeOrNotes: scratchpad,
+        targetLevel,
+        sev1Incident: activeSev1Incident || undefined,
+        finishInterview: true,
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Grading failed');
+      if (!data.scorecard) throw new Error('Hiring Committee scorecard was incomplete. Click Retry Grading.');
       const card: ScorecardData = data.scorecard;
+      if (data.fallbackFrom) {
+        setAiBanner({
+          type: 'info',
+          message: `Primary model busy — Hiring Committee graded via ${data.modelUsed}.`,
+        });
+      }
       setFinalScorecard(card);
       triggerVerdictBurst(card.verdict);
       onRecordMock({
@@ -421,30 +833,15 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
         completedAt: new Date().toISOString(),
         durationSeconds: elapsedSec,
         summary: card.summary,
+        growthAreas: card.growthAreas,
         rubricScores: card.rubricScores,
       });
-    } catch {
-      const fallbackCard: ScorecardData = {
-        score: 79,
-        verdict: 'Hire',
-        summary: 'Strong structured problem solving and production cloud trade-offs across this round.',
-        technicalStrengths: activeRoundStep.expectedSignals.slice(0, 2),
-        growthAreas: ['Quantify p99 latency & BigQuery slot cost math upfront in your GCA gate.'],
-        rubricScores: { gca: 80, rrk: 78, leadership: 77, googleyness: 83 },
-      };
-      setFinalScorecard(fallbackCard);
-      triggerVerdictBurst(fallbackCard.verdict);
-      onRecordMock({
-        mockId: activeMock.id,
-        mockNumber: activeMock.mockNumber,
-        title: `${activeMock.title} (${activeRoundStep.roundLabel})`,
-        roundType: activeRoundStep.roundType,
-        score: fallbackCard.score,
-        verdict: fallbackCard.verdict,
-        completedAt: new Date().toISOString(),
-        durationSeconds: elapsedSec,
-        summary: fallbackCard.summary,
-        rubricScores: fallbackCard.rubricScores,
+    } catch (err: unknown) {
+      setAiBanner({
+        type: 'retry',
+        message: sanitizeAiErrorMessage(err, 'Hiring Committee grading failed due to temporary load.'),
+        retryLabel: 'Retry Grading',
+        retryAction: () => handleFinishAndGrade(),
       });
     } finally {
       setAiThinking(false);
@@ -521,17 +918,49 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
                 {activeSev1Incident ? '🚨 Drop Another Sev-1' : '🚨 Drop Live Sev-1 Alert'}
               </button>
             )}
+            {/* Live Voice Mode vs Text Mode Toggle */}
+            <div className="flex items-center p-0.5 rounded-lg border border-subtle bg-canvas text-[11px] font-semibold">
+              <button
+                type="button"
+                onClick={() => {
+                  if (voiceMode !== 'live') startLiveVoiceSession();
+                }}
+                className={`px-2.5 py-1 rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
+                  voiceMode === 'live'
+                    ? 'bg-accent text-accent-contrast'
+                    : 'text-muted hover:text-primary'
+                }`}
+              >
+                <Radio className="w-3 h-3" />
+                🎙️ Live Voice Mode (Gemini Live API)
+              </button>
+              <button
+                type="button"
+                onClick={() => stopLiveVoiceSession(true)}
+                className={`px-2.5 py-1 rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
+                  voiceMode === 'text'
+                    ? 'bg-card border border-subtle text-primary shadow-sm'
+                    : 'text-muted hover:text-primary'
+                }`}
+              >
+                <MessageSquare className="w-3 h-3" />
+                💬 Text Mode
+              </button>
+            </div>
             <span className="px-3 py-1.5 rounded-lg border border-subtle bg-canvas font-mono text-xs tabular-nums flex items-center gap-1.5 text-primary">
               <Clock className="w-3.5 h-3.5 text-accent" />
               {formatTimer(elapsedSec)}
             </span>
-            <button
-              onClick={() => setTtsEnabled((v) => !v)}
-              title="Toggle Interviewer Voice"
-              className="btn-tactile p-2 rounded-lg border border-subtle bg-canvas text-muted hover:text-primary hover:border-accent"
-            >
-              {ttsEnabled ? <Volume2 className="w-4 h-4 text-accent" /> : <VolumeX className="w-4 h-4" />}
-            </button>
+            {voiceMode === 'live' && (
+              <button
+                type="button"
+                onClick={() => setLiveSpeakerMuted((v) => !v)}
+                title={liveSpeakerMuted ? 'Unmute Interviewer Audio' : 'Mute Interviewer Audio'}
+                className="btn-tactile p-2 rounded-lg border border-subtle bg-canvas text-muted hover:text-primary hover:border-accent"
+              >
+                {liveSpeakerMuted ? <VolumeX className="w-4 h-4 text-[#EF4444]" /> : <Volume2 className="w-4 h-4 text-accent" />}
+              </button>
+            )}
             <button
               disabled={aiThinking}
               onClick={handleFinishAndGrade}
@@ -541,6 +970,7 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
             </button>
             <button
               onClick={() => {
+                stopLiveVoiceSession(true);
                 onClearCustomMock?.();
                 onSelectMockNumber(null);
               }}
@@ -572,6 +1002,47 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
             );
           })}
         </div>
+
+        {/* AI Retry / Fallback Status Banner */}
+        {aiBanner && (
+          <div
+            className={`rounded-xl border px-4 py-2.5 flex flex-wrap items-center justify-between gap-2.5 text-xs ${
+              aiBanner.type === 'retry'
+                ? 'border-[#EF4444]/45 bg-[#EF4444]/10 text-red-700 dark:text-[#EF4444]'
+                : 'border-accent/35 bg-accent/10 text-primary'
+            }`}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              {aiBanner.type === 'retry' ? (
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+              ) : (
+                <Sparkles className="w-4 h-4 text-accent shrink-0" />
+              )}
+              <span>{aiBanner.message}</span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {aiBanner.retryAction && (
+                <button
+                  type="button"
+                  disabled={aiThinking}
+                  onClick={aiBanner.retryAction}
+                  className="btn-tactile px-3 py-1 rounded-md bg-accent text-accent-contrast text-[11px] font-bold hover:bg-accent-hover flex items-center gap-1"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  {aiBanner.retryLabel || 'Retry'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setAiBanner(null)}
+                className="p-1 text-muted hover:text-primary"
+                aria-label="Dismiss AI banner"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* 4-Pillar Google Hiring Committee Scorecard */}
         {finalScorecard && (
@@ -664,42 +1135,155 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
 
         {/* Two-Column Video Call + Live Shared Workspace */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
-          {/* Left: Distinct Specialist Interviewer Video + Transcript */}
+          {/* Left: Distinct Specialist Interviewer Video + Live Waveform Ring + Transcript */}
           <div className="lg:col-span-5 rounded-xl border border-subtle bg-card flex flex-col max-h-[720px] overflow-hidden">
-            <div className="relative p-4 bg-[#09090B] border-b border-[#27272A] flex flex-col items-center">
-              <div
-                className={`relative w-full max-w-[340px] aspect-[4/3] rounded-xl overflow-hidden border-2 transition-all duration-300 ${
-                  isAiSpeaking
-                    ? 'border-accent shadow-[0_0_30px_rgba(var(--accent-rgb),0.6)] animate-voice-halo'
-                    : 'border-[#27272A]'
-                }`}
-              >
-                <AnimeCharacterAvatar
-                  profile={currentInterviewer}
-                  isSpeaking={isAiSpeaking}
-                  nodTrigger={nodTrigger}
-                  size="studio"
-                />
+            <div className="relative p-4 bg-editor border-b border-subtle flex flex-col items-center gap-2.5">
+              {/* Outer Real-Time Audio Waveform Ring Container */}
+              {(() => {
+                const isLiveConnected = voiceMode === 'live' && liveStatus === 'connected';
+                const isLiveListening = isLiveConnected && !liveMicMuted && !isAiSpeaking;
+                const activeLevel = isAiSpeaking ? aiAudioLevel : isLiveListening ? micAudioLevel : 0;
+                const ringGlowPx = Math.round(14 + activeLevel * 28);
+                return (
+                  <div className="relative w-full max-w-[340px] flex items-center justify-center">
+                    {(isAiSpeaking || isLiveListening) && (
+                      <div
+                        className="absolute -inset-1.5 rounded-2xl pointer-events-none transition-all duration-75"
+                        style={{
+                          border: isAiSpeaking
+                            ? '2px solid rgba(var(--accent-rgb), 0.78)'
+                            : '2px solid rgba(16, 185, 129, 0.72)',
+                          boxShadow: isAiSpeaking
+                            ? `0 0 ${ringGlowPx}px rgba(var(--accent-rgb), ${0.28 + activeLevel * 0.52})`
+                            : `0 0 ${ringGlowPx}px rgba(16, 185, 129, ${0.22 + activeLevel * 0.45})`,
+                          transform: `scale(${1 + activeLevel * 0.028})`,
+                        }}
+                      />
+                    )}
+                    <div
+                      className={`relative w-full aspect-[4/3] rounded-xl overflow-hidden border-2 transition-all duration-150 ${
+                        isAiSpeaking
+                          ? 'border-accent'
+                          : isLiveListening
+                          ? 'border-[#10B981]/80'
+                          : 'border-subtle'
+                      }`}
+                    >
+                      <AnimeCharacterAvatar
+                        profile={currentInterviewer}
+                        isSpeaking={isAiSpeaking}
+                        isLiveListening={isLiveListening}
+                        audioLevel={activeLevel}
+                        nodTrigger={nodTrigger}
+                        size="studio"
+                      />
 
-                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/45 to-transparent p-3 flex items-end justify-between z-20">
-                  <div>
-                    <div className="text-xs font-bold text-white">{currentInterviewer.name}</div>
-                    <div className="text-[10px] text-zinc-300">
-                      {currentInterviewer.role} · {currentInterviewer.team}
+                      {/* Live Mode Status Pill */}
+                      <div className="absolute top-2.5 left-2.5 right-2.5 flex items-center justify-between gap-2 z-20">
+                        <span
+                          className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold backdrop-blur-md border flex items-center gap-1.5 ${
+                            voiceMode === 'live'
+                              ? liveStatus === 'connected'
+                                ? isAiSpeaking
+                                  ? 'bg-accent/25 border-accent/60 text-white'
+                                  : 'bg-[#10B981]/20 border-[#10B981]/60 text-emerald-200'
+                                : 'bg-amber-500/20 border-amber-500/50 text-amber-200'
+                              : 'bg-black/65 border-white/15 text-zinc-300'
+                          }`}
+                        >
+                          <span
+                            className={`w-1.5 h-1.5 rounded-full ${
+                              voiceMode === 'live'
+                                ? liveStatus === 'connected'
+                                  ? isAiSpeaking
+                                    ? 'bg-accent animate-pulse'
+                                    : 'bg-[#10B981] animate-pulse'
+                                  : 'bg-amber-400 animate-pulse'
+                                : 'bg-zinc-400'
+                            }`}
+                          />
+                          {voiceMode === 'live'
+                            ? liveStatus === 'connecting'
+                              ? 'CONNECTING GEMINI LIVE...'
+                              : isAiSpeaking
+                              ? 'LIVE VOICE · SPEAKING'
+                              : liveMicMuted
+                              ? 'LIVE VOICE · MIC MUTED'
+                              : 'LIVE VOICE · LISTENING'
+                            : 'TEXT MODE · SILENT'}
+                        </span>
+
+                        {voiceMode === 'live' && liveStatus === 'connected' && (
+                          <button
+                            type="button"
+                            onClick={() => setLiveMicMuted((m) => !m)}
+                            className={`px-2 py-0.5 rounded-md text-[10px] font-semibold border backdrop-blur-md flex items-center gap-1 ${
+                              liveMicMuted
+                                ? 'bg-[#EF4444]/85 border-[#EF4444] text-white'
+                                : 'bg-black/60 border-white/20 text-zinc-100 hover:border-accent'
+                            }`}
+                          >
+                            {liveMicMuted ? <MicOff className="w-3 h-3" /> : <Mic className="w-3 h-3 text-[#10B981]" />}
+                            {liveMicMuted ? 'Muted' : 'Mic On'}
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/45 to-transparent p-3 flex items-end justify-between z-20">
+                        <div>
+                          <div className="text-xs font-bold text-white">{currentInterviewer.name}</div>
+                          <div className="text-[10px] text-zinc-300">
+                            {currentInterviewer.role} · {currentInterviewer.team}
+                          </div>
+                        </div>
+                        {/* Real-Time Waveform Bars */}
+                        <div className="flex items-end gap-0.5 h-5" aria-hidden="true">
+                          {[0.42, 0.88, 0.62, 1, 0.72, 0.5, 0.84].map((weight, idx) => {
+                            const barLevel = isAiSpeaking || isLiveListening ? Math.max(0.18, activeLevel) : 0;
+                            const px =
+                              barLevel > 0 ? Math.max(4, Math.round(weight * barLevel * 20)) : 4;
+                            return (
+                              <span
+                                key={idx}
+                                className={`w-1 rounded-full transition-all duration-75 ${
+                                  isAiSpeaking
+                                    ? 'bg-accent opacity-100'
+                                    : isLiveListening
+                                    ? 'bg-[#10B981] opacity-95'
+                                    : 'bg-accent opacity-30'
+                                }`}
+                                style={{ height: `${px}px` }}
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
                     </div>
                   </div>
-                  <div className="flex items-end gap-0.5 h-5">
-                    {[0.4, 0.9, 0.6, 1, 0.5, 0.8].map((h, idx) => (
-                      <span
-                        key={idx}
-                        className={`w-1 rounded-full bg-accent transition-all duration-150 ${
-                          isAiSpeaking ? 'opacity-100' : 'opacity-30'
-                        }`}
-                        style={{ height: isAiSpeaking ? `${Math.round(h * 18)}px` : '4px' }}
-                      />
-                    ))}
-                  </div>
-                </div>
+                );
+              })()}
+
+              {/* Quick Live Call CTA inside Video Stage when in Text Mode */}
+              <div className="w-full max-w-[340px] flex items-center justify-between gap-2 text-[11px]">
+                {voiceMode === 'text' ? (
+                  <button
+                    type="button"
+                    onClick={startLiveVoiceSession}
+                    className="btn-tactile w-full py-1.5 px-3 rounded-lg bg-accent/15 border border-accent/45 text-accent font-semibold hover:bg-accent/25 flex items-center justify-center gap-1.5"
+                  >
+                    <Radio className="w-3.5 h-3.5" />
+                    🎙️ Switch to Real-Time Voice Call (Gemini Live API)
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => stopLiveVoiceSession(true)}
+                    className="btn-tactile w-full py-1.5 px-3 rounded-lg bg-elevated border border-subtle text-primary font-semibold hover:border-accent hover:text-accent flex items-center justify-center gap-1.5"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    💬 Switch to Quiet Text Mode
+                  </button>
+                )}
               </div>
             </div>
 
@@ -721,6 +1305,22 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
                   <p className="text-primary/90 leading-relaxed">{t.text}</p>
                 </motion.div>
               ))}
+              {liveInputDraft && (
+                <div className="ml-6 p-3 rounded-lg bg-accent/10 border border-dashed border-accent/45">
+                  <div className="font-semibold text-[11px] text-[#10B981] mb-1">
+                    🎙️ You (Speaking live...)
+                  </div>
+                  <p className="text-primary/90 leading-relaxed">{liveInputDraft}</p>
+                </div>
+              )}
+              {liveOutputDraft && (
+                <div className="p-3 rounded-lg bg-canvas border border-dashed border-accent/45">
+                  <div className="font-semibold text-[11px] text-accent mb-1">
+                    🔊 {currentInterviewer.name} (Speaking live...)
+                  </div>
+                  <p className="text-primary/90 leading-relaxed">{liveOutputDraft}</p>
+                </div>
+              )}
               {aiThinking && (
                 <div className="text-xs text-accent px-2">
                   ✨ {currentInterviewer.name} is evaluating your response &amp; buffer...
@@ -733,23 +1333,50 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
               onSubmit={handleSendTurn}
               className="p-3 border-t border-subtle flex items-center gap-2"
             >
-              <button
-                type="button"
-                onClick={toggleVoiceMic}
-                title="Speak via Web Speech API"
-                className={`btn-tactile p-2 rounded-lg border transition-colors ${
-                  isListening
-                    ? 'bg-[#EF4444] text-white border-[#EF4444]'
-                    : 'border-subtle text-muted hover:border-accent hover:text-primary'
-                }`}
-              >
-                {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
-              </button>
+              {voiceMode === 'text' && (
+                <button
+                  type="button"
+                  disabled={transcribingTarget !== null}
+                  onClick={() => toggleAudioTranscription('turn')}
+                  title={
+                    recordingTarget === 'turn'
+                      ? 'Stop & Transcribe with Gemini Audio'
+                      : 'Record Technical Answer (Gemini Audio Transcription)'
+                  }
+                  className={`btn-tactile px-2.5 py-2 rounded-lg border transition-colors flex items-center gap-1 text-[11px] font-semibold shrink-0 ${
+                    recordingTarget === 'turn'
+                      ? 'bg-[#EF4444] text-white border-[#EF4444]'
+                      : transcribingTarget === 'turn'
+                      ? 'bg-accent/20 text-accent border-accent/50'
+                      : 'border-subtle text-muted hover:border-accent hover:text-primary'
+                  }`}
+                >
+                  {recordingTarget === 'turn' ? (
+                    <>
+                      <Square className="w-3.5 h-3.5 fill-current" />
+                      Stop
+                    </>
+                  ) : transcribingTarget === 'turn' ? (
+                    'Transcribing...'
+                  ) : (
+                    <>
+                      <Mic className="w-3.5 h-3.5" />
+                      Dictate
+                    </>
+                  )}
+                </button>
+              )}
               <input
                 type="text"
                 value={candidateInput}
                 onChange={(e) => setCandidateInput(e.target.value)}
-                placeholder={isListening ? 'Listening... speak your answer' : 'Think aloud or answer probe...'}
+                placeholder={
+                  recordingTarget === 'turn'
+                    ? 'Recording... click Stop to transcribe DE terms'
+                    : voiceMode === 'live'
+                    ? 'Speak aloud or send a quick text note...'
+                    : 'Type or click Dictate (Gemini Transcribe)...'
+                }
                 className="flex-1 px-3 py-2 text-xs rounded-lg border border-subtle bg-canvas text-primary focus:outline-none focus:border-accent"
               />
               <button
@@ -814,10 +1441,34 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
                   <textarea
                     value={clarifyingInput}
                     onChange={(e) => setClarifyingInput(e.target.value)}
-                    placeholder="Type 2-3 clarifying questions on data scale, out-of-order arrivals, schema edge cases, or SLAs..."
+                    placeholder="Type or record 2-3 clarifying questions on data scale, out-of-order arrivals, schema edge cases, or SLAs..."
                     className="w-full h-24 rounded-lg border border-subtle bg-card text-primary p-3 text-xs focus:outline-none focus:border-accent"
                   />
-                  <div className="flex justify-end">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      disabled={transcribingTarget !== null}
+                      onClick={() => toggleAudioTranscription('clarify')}
+                      className={`btn-tactile px-3 py-2 rounded-lg border text-xs font-semibold flex items-center gap-1.5 ${
+                        recordingTarget === 'clarify'
+                          ? 'bg-[#EF4444] text-white border-[#EF4444]'
+                          : 'border-subtle bg-card text-primary hover:border-accent'
+                      }`}
+                    >
+                      {recordingTarget === 'clarify' ? (
+                        <>
+                          <Square className="w-3.5 h-3.5 fill-current" />
+                          Stop &amp; Transcribe
+                        </>
+                      ) : transcribingTarget === 'clarify' ? (
+                        'Transcribing Audio...'
+                      ) : (
+                        <>
+                          <Mic className="w-3.5 h-3.5 text-accent" />
+                          🎙️ Speak Clarifications (Gemini Transcribe)
+                        </>
+                      )}
+                    </button>
                     <button
                       type="submit"
                       disabled={aiThinking}
@@ -830,7 +1481,7 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
               </div>
             ) : (
               <>
-                <div className="p-3 bg-[#09090B] flex-1 min-h-[300px]">
+                <div className="p-3 bg-editor flex-1 min-h-[300px]">
                   <textarea
                     value={scratchpad}
                     onChange={(e) => {
@@ -839,14 +1490,14 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
                     }}
                     spellCheck={false}
                     placeholder="Write SQL, Python, architecture components, capacity math, or STAR+L bullets here..."
-                    className="w-full h-full min-h-[280px] bg-[#09090B] text-zinc-100 font-mono text-xs leading-relaxed resize-none focus:outline-none p-2"
+                    className="w-full h-full min-h-[280px] bg-editor text-primary placeholder:text-muted font-mono text-xs leading-relaxed resize-none focus:outline-none p-2"
                   />
                 </div>
 
                 {sqlPreviewOutput && (
                   <pre
-                    className={`p-3 border-t border-[#27272A] bg-[#09090B] font-mono text-[11px] max-h-36 overflow-auto ${
-                      sqlPreviewOutput.startsWith('❌') ? 'text-[#EF4444] animate-shake' : 'text-emerald-300'
+                    className={`p-3 border-t border-subtle bg-editor font-mono text-[11px] max-h-36 overflow-auto ${
+                      sqlPreviewOutput.startsWith('❌') ? 'text-[#EF4444] animate-shake' : 'text-emerald-700 dark:text-emerald-300'
                     }`}
                   >
                     {sqlPreviewOutput}
@@ -1096,7 +1747,7 @@ export const AssessmentHubView: React.FC<AssessmentHubViewProps> = ({
 
                   <div className="pt-3 border-t border-subtle flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 min-w-0">
-                      <div className="rounded-full border border-accent/60 p-0.5 bg-[#09090B] shrink-0">
+                      <div className="rounded-full border border-accent/60 p-0.5 bg-elevated shrink-0">
                         <AnimeCharacterAvatar profile={mock.interviewerProfile} size="sm" />
                       </div>
                       <div className="min-w-0">

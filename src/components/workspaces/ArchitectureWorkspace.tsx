@@ -1,8 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ArchEdge, ArchNode, ArchTradeOffRow, Question } from '../../types/platform';
+import { sanitizeAiErrorMessage } from '../../utils/storage';
+import { reviewArchitecture } from '../../services/geminiAiService';
 import { CelebrationBurst } from '../visuals/CelebrationAndBadges';
 import { FollowUpsSection } from './FollowUpsSection';
-import { ArrowRight, Calculator, ChevronDown, ChevronUp, Eye, Link2, Plus, Rocket, Scale, Trash2 } from 'lucide-react';
+import { ArrowRight, Calculator, ChevronDown, ChevronUp, Eye, Link2, Plus, RefreshCw, Rocket, Scale, Trash2 } from 'lucide-react';
 
 interface ArchitectureWorkspaceProps {
   question: Question;
@@ -154,21 +156,15 @@ export const ArchitectureWorkspace: React.FC<ArchitectureWorkspaceProps> = ({
     setReviewing(true);
     setReviewError(null);
     try {
-      const res = await fetch('/api/ai/review-architecture', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          questionTitle: question.title,
-          scenario: spec.scenario,
-          task: spec.task,
-          constraints: spec.scaleConstraints,
-          nodes,
-          edges,
-          tradeOffMatrix: tradeOffRows,
-        }),
+      const data = await reviewArchitecture({
+        questionTitle: question.title,
+        scenario: spec.scenario,
+        task: spec.task,
+        constraints: spec.scaleConstraints,
+        nodes,
+        edges,
+        tradeOffMatrix: tradeOffRows,
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'AI review failed');
       setReviewResult(data);
       const passed = Number(data.score) >= 65;
       onRecordSubmission(passed);
@@ -177,7 +173,7 @@ export const ArchitectureWorkspace: React.FC<ArchitectureWorkspaceProps> = ({
         setTimeout(() => setShowCelebration(false), 2100);
       }
     } catch (err: unknown) {
-      setReviewError(err instanceof Error ? err.message : 'Unable to grade architecture.');
+      setReviewError(sanitizeAiErrorMessage(err, 'Unable to grade architecture.'));
     } finally {
       setReviewing(false);
     }
@@ -436,8 +432,8 @@ export const ArchitectureWorkspace: React.FC<ArchitectureWorkspaceProps> = ({
           {nodes.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div className="text-center px-6">
-                <p className="text-sm font-semibold text-zinc-500">Architecture Whiteboard Ready</p>
-                <p className="text-xs text-zinc-400 mt-1">
+                <p className="text-sm font-semibold text-muted">Architecture Whiteboard Ready</p>
+                <p className="text-xs text-muted mt-1">
                   Click components above to place Ingestion, Compute, Storage, and AI nodes, then connect directional arrows.
                 </p>
               </div>
@@ -576,12 +572,25 @@ export const ArchitectureWorkspace: React.FC<ArchitectureWorkspaceProps> = ({
 
         {(reviewResult || reviewError) && (
           <div className="border-t border-subtle p-4 max-h-[240px] overflow-y-auto text-xs space-y-2.5">
-            {reviewError && <div className="animate-shake p-3 rounded-lg bg-[#EF4444]/15 text-[#EF4444]">❌ {reviewError}</div>}
+            {reviewError && (
+              <div className="animate-shake p-3 rounded-lg bg-[#EF4444]/15 text-[#EF4444] flex items-center justify-between gap-2">
+                <span>❌ {reviewError}</span>
+                <button
+                  type="button"
+                  disabled={reviewing}
+                  onClick={handleSubmitReview}
+                  className="btn-tactile px-2.5 py-1 rounded-md bg-accent text-accent-contrast text-[11px] font-bold hover:bg-accent-hover flex items-center gap-1 shrink-0"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Retry
+                </button>
+              </div>
+            )}
             {reviewResult && (
               <>
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-sm text-primary">
-                    Gemini 4 Hydrogen Architecture Verdict: {reviewResult.verdict}
+                    Staff Architecture Verdict: {reviewResult.verdict}
                   </span>
                   <span className="font-mono font-bold text-sm text-accent tabular-nums">{reviewResult.score}/100</span>
                 </div>

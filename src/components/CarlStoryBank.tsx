@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { CarlStory } from '../types/platform';
+import { sendCopilotChat } from '../services/geminiAiService';
 import { Dices, Edit3, Plus, Save, Send, Sparkles, Trash2, X } from 'lucide-react';
 
 interface CarlStoryBankProps {
@@ -51,32 +52,24 @@ export const CarlStoryBank: React.FC<CarlStoryBankProps> = ({
     setGrillLoading(true);
 
     try {
-      const res = await fetch('/api/ai/copilot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mode: 'quiz',
-          context: {
-            view: 'CARL Behavioral Story Bank Grill',
-            trackName: 'Behavioral & Googleyness',
-            concept: 'Googleyness & Ambiguity Navigation',
-            questionTitle: picked.title,
-            questionPrompt: `Project: ${picked.projectTag}\nContext: ${picked.context}\nAction: ${picked.action}\nResult: ${picked.result}\nReflection: ${picked.reflection}`,
+      const data = await sendCopilotChat({
+        mode: 'quiz',
+        context: {
+          view: 'CARL Behavioral Story Bank Grill',
+          trackName: 'Behavioral & Googleyness',
+          concept: 'Googleyness & Ambiguity Navigation',
+          questionTitle: picked.title,
+          questionPrompt: `Project: ${picked.projectTag}\nContext: ${picked.context}\nAction: ${picked.action}\nResult: ${picked.result}\nReflection: ${picked.reflection}`,
+        },
+        messages: [
+          {
+            role: 'user',
+            content:
+              'Act as a Google L4/L5 Bar-Raiser Interviewer grilling me on this CARL story. Ask ONE sharp, skeptical curveball follow-up probing either my technical ownership, cross-team conflict, or my Reflection ("what I would do differently"). Keep it crisp (2-3 sentences).',
           },
-          messages: [
-            {
-              role: 'user',
-              content:
-                'Act as a Google L4/L5 Bar-Raiser Interviewer grilling me on this CARL story. Ask ONE sharp, skeptical curveball follow-up probing either my technical ownership, cross-team conflict, or my Reflection ("what I would do differently"). Keep it crisp (2-3 sentences).',
-            },
-          ],
-        }),
+        ],
       });
-      const data = await res.json();
-      const firstProbe = res.ok
-        ? data.reply
-        : `Looking at "${picked.title}", suppose a senior stakeholder pushed back on your approach right before cutover—how did you defend your decision with metrics, and what would you change today beyond "${picked.reflection}"?`;
-      setGrillMessages([{ role: 'interviewer', text: firstProbe }]);
+      setGrillMessages([{ role: 'interviewer', text: data.reply }]);
     } catch {
       setGrillMessages([
         {
@@ -101,34 +94,26 @@ export const CarlStoryBank: React.FC<CarlStoryBankProps> = ({
     setGrillLoading(true);
 
     try {
-      const res = await fetch('/api/ai/copilot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mode: 'grade',
-          context: {
-            view: 'CARL Behavioral Story Bank Grill',
-            questionTitle: grillingStory.title,
-            questionPrompt: `Context: ${grillingStory.context}\nAction: ${grillingStory.action}\nResult: ${grillingStory.result}\nReflection: ${grillingStory.reflection}`,
+      const data = await sendCopilotChat({
+        mode: 'grade',
+        context: {
+          view: 'CARL Behavioral Story Bank Grill',
+          questionTitle: grillingStory.title,
+          questionPrompt: `Context: ${grillingStory.context}\nAction: ${grillingStory.action}\nResult: ${grillingStory.result}\nReflection: ${grillingStory.reflection}`,
+        },
+        messages: [
+          ...nextMsgs.map((m) => ({
+            role: m.role === 'interviewer' ? 'assistant' : 'user',
+            content: m.text,
+          })),
+          {
+            role: 'user',
+            content:
+              'Grade my answer on Googleyness & Leadership (Strong Hire / Hire / Lean Hire) in 2 concise sentences, then drop ONE final curveball follow-up.',
           },
-          messages: [
-            ...nextMsgs.map((m) => ({
-              role: m.role === 'interviewer' ? 'assistant' : 'user',
-              content: m.text,
-            })),
-            {
-              role: 'user',
-              content:
-                'Grade my answer on Googleyness & Leadership (Strong Hire / Hire / Lean Hire) in 2 concise sentences, then drop ONE final curveball follow-up.',
-            },
-          ],
-        }),
+        ],
       });
-      const data = await res.json();
-      const reply = res.ok
-        ? data.reply
-        : 'Good clarity and metric ownership. Final curveball: how would this design hold up if compliance audits required 7-year immutable replay?';
-      setGrillMessages((prev) => [...prev, { role: 'interviewer', text: reply }]);
+      setGrillMessages((prev) => [...prev, { role: 'interviewer', text: data.reply }]);
     } catch {
       setGrillMessages((prev) => [
         ...prev,
